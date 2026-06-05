@@ -281,7 +281,7 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
     for s in specs:
         full_cards.append(next(card_iter) if s is not None else None)
 
-    # 5. 按组发：组头单独一条 + 组内每笔（markdown + 图）独立成对
+    # 5. 按组发：① 组头单条 ② 组内所有笔合一条多行 markdown ③ 每笔一张图
     n = 0
     card_idx = 0
     for sup in group_order:
@@ -295,19 +295,27 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
             card_idx += len(members)
             continue
 
+        # 组内所有笔合并一条 markdown
+        lines_md = "\n".join(render_b(p) for p in payloads)
+        try:
+            wecom.send_markdown(lines_md)
+        except Exception as e:
+            log.exception("B group lines send failed (%s): %s", sup, e)
+            card_idx += len(members)
+            continue
+
+        # 每笔一张图 + 写库（message_text 存单笔行，dashboard 看更干净）
         for d, payload in zip(members, payloads):
             card_path = full_cards[card_idx]
             card_idx += 1
-            line = render_b(payload)
             try:
-                wecom.send_markdown(line)
                 if card_path and Path(card_path).exists():
                     try:
                         wecom.send_image(card_path)
                     except Exception as e:
                         log.warning("card image send failed for %s: %s", payload.refund_id, e)
                 _record_push(
-                    payload.refund_id, "B", line,
+                    payload.refund_id, "B", render_b(payload),
                     str(card_path) if card_path else None,
                 )
                 n += 1

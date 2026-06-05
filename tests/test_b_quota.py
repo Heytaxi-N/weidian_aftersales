@@ -133,16 +133,18 @@ def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
     runner._push_b(decisions, NOW, dry_run=False)
 
     # 应当按 deadline 升序取前 3：C(10), D(30), B(50)
-    # 所有归为"无供货商"组 → 1 条组头 + 3 条单笔 markdown
-    assert len(sent_md) == 4, f"应有 1 组头 + 3 笔 = 4 条 markdown，实际 {len(sent_md)}"
+    # 所有归为"无供货商"组 → 1 条组头 + 1 条多行 markdown（3 笔合并）
+    assert len(sent_md) == 2, f"应有 1 组头 + 1 条多行 = 2 条 markdown，实际 {len(sent_md)}"
     assert "无供货商" in sent_md[0] and "3 笔" in sent_md[0]
-    # 单笔顺序按 deadline 升序：C → D → B
-    assert "TNC" in sent_md[1], sent_md[1]
-    assert "TND" in sent_md[2], sent_md[2]
-    assert "TNB" in sent_md[3], sent_md[3]
+    # 多行 markdown 里顺序按 deadline 升序：C → D → B
+    body = sent_md[1]
+    pos_c = body.find("TNC")
+    pos_d = body.find("TND")
+    pos_b = body.find("TNB")
+    assert pos_c >= 0 and pos_d >= 0 and pos_b >= 0
+    assert pos_c < pos_d < pos_b, f"顺序错: TNC={pos_c} TND={pos_d} TNB={pos_b}"
     # 不应包含 A/E（被裁掉）
-    joined = "\n".join(sent_md)
-    assert "TNA" not in joined and "TNE" not in joined
+    assert "TNA" not in body and "TNE" not in body
 
 
 def test_b_push_quota_exhausted(fresh_db, monkeypatch):
