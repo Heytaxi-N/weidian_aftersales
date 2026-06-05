@@ -22,8 +22,8 @@ from src.logistics import weidian_trace as logistics_provider
 from src.notify import render as card_render, wecom
 from src.notify.templates import (
     OverviewStats,
-    render_b,  # noqa: F401 -- legacy, 暂留 import
-    render_b_group,
+    render_b,
+    render_b_group_header,
     render_overview,
     render_urgent,
 )
@@ -281,13 +281,13 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
     for s in specs:
         full_cards.append(next(card_iter) if s is not None else None)
 
-    # 5. 按组发：组 header markdown + 组内每笔一张图
+    # 5. 按组发：组头单独一条 + 组内每笔（markdown + 图）独立成对
     n = 0
     card_idx = 0
     for sup in group_order:
         members = groups[sup]
         payloads = [to_payload(d) for d in members]
-        header = render_b_group(sup, payloads)
+        header = render_b_group_header(sup, len(members))
         try:
             wecom.send_markdown(header)
         except Exception as e:
@@ -298,14 +298,16 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
         for d, payload in zip(members, payloads):
             card_path = full_cards[card_idx]
             card_idx += 1
+            line = render_b(payload)
             try:
+                wecom.send_markdown(line)
                 if card_path and Path(card_path).exists():
                     try:
                         wecom.send_image(card_path)
                     except Exception as e:
                         log.warning("card image send failed for %s: %s", payload.refund_id, e)
                 _record_push(
-                    payload.refund_id, "B", header,
+                    payload.refund_id, "B", line,
                     str(card_path) if card_path else None,
                 )
                 n += 1

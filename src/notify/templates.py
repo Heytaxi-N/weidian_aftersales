@@ -77,11 +77,16 @@ def render_b_line(p: PushPayload) -> str:
     return f"{p.buyer_name or '—'}，退，{p.return_tracking_no or '—'}"
 
 
+def render_b_group_header(supplier_name: str | None, count: int) -> str:
+    """B 分组的"组头" markdown — 单独一条消息，下面跟该组每笔的独立 markdown + 图。"""
+    if supplier_name:
+        return f"合作供货商：**{supplier_name}**（{count} 笔）"
+    return f"无供货商（{count} 笔）"
+
+
 def render_b_group(supplier_name: str | None, payloads: list[PushPayload]) -> str:
-    """B 按供货商分组后的一条 markdown：标题 + 多笔合并。"""
-    title = f"合作供货商：**{supplier_name}**（{len(payloads)} 笔）" if supplier_name \
-        else f"无供货商（{len(payloads)} 笔）"
-    lines = [title, "─" * 18]
+    """[已废弃] 把组头和组内笔合到一条 markdown 的旧渲染，保留兼容老调用。"""
+    lines = [render_b_group_header(supplier_name, len(payloads)), "─" * 18]
     for p in payloads:
         lines.append(render_b_line(p))
     return "\n".join(lines)
