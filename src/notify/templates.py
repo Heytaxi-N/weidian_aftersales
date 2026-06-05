@@ -72,6 +72,21 @@ def render_b(p: PushPayload) -> str:
     return B_TEMPLATE.render(p=p).strip()
 
 
+def render_b_line(p: PushPayload) -> str:
+    """B 场景单行（用于一条 markdown 合并多笔）。"""
+    return f"{p.buyer_name or '—'}，退，{p.return_tracking_no or '—'}"
+
+
+def render_b_group(supplier_name: str | None, payloads: list[PushPayload]) -> str:
+    """B 按供货商分组后的一条 markdown：标题 + 多笔合并。"""
+    title = f"合作供货商：**{supplier_name}**（{len(payloads)} 笔）" if supplier_name \
+        else f"无供货商（{len(payloads)} 笔）"
+    lines = [title, "─" * 18]
+    for p in payloads:
+        lines.append(render_b_line(p))
+    return "\n".join(lines)
+
+
 # 兼容旧接口（dashboard 等地方可能引用），保留 render_push 走 URGENT_TEMPLATE
 def render_push(p: PushPayload) -> str:
     return render_urgent(p)

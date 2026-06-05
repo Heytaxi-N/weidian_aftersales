@@ -28,9 +28,11 @@ class RefundRecord:
     receiver_name: str | None = None
     receiver_phone: str | None = None
     item_title: str | None = None
+    item_id: str | None = None               # 商品 ID，匹配供货商时用
     return_tracking_no: str | None = None
     return_express_type: int | None = None   # 微店内部承运商 ID，调 trace 接口要用
     detail_url: str | None = None
+    supplier_name: str | None = None         # 合作供货商（按 order_id × item_id 查 getOrderListForPC）
 
 
 @dataclass

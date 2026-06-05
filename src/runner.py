@@ -22,7 +22,8 @@ from src.logistics import weidian_trace as logistics_provider
 from src.notify import render as card_render, wecom
 from src.notify.templates import (
     OverviewStats,
-    render_b,
+    render_b,  # noqa: F401 -- legacy, 暂留 import
+    render_b_group,
     render_overview,
     render_urgent,
 )
@@ -36,6 +37,7 @@ from src.rules.engine import (
     to_payload,
 )
 from src.weidian import client as weidian_client
+from src.weidian import order_supplier as weidian_supplier
 from src.weidian import overview as weidian_overview
 
 log = logging.getLogger("runner")
@@ -64,14 +66,15 @@ def _write_snapshot(refunds: list[RefundRecord], snapshot_at: str) -> None:
                 """INSERT OR REPLACE INTO order_snapshots
                    (snapshot_at, refund_id, order_id, refund_type, status, deadline_at,
                     buyer_name, buyer_phone, receiver_name, receiver_phone, item_title,
-                    return_tracking_no, detail_url, raw_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    item_id, return_tracking_no, supplier_name, detail_url, raw_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     snapshot_at,
                     r.refund_id, r.order_id, r.refund_type, r.status,
                     r.deadline_at.isoformat() if r.deadline_at else None,
                     r.buyer_name, r.buyer_phone, r.receiver_name, r.receiver_phone,
-                    r.item_title, r.return_tracking_no, r.detail_url,
+                    r.item_title, r.item_id, r.return_tracking_no, r.supplier_name,
+                    r.detail_url,
                     json.dumps(asdict(r), default=str, ensure_ascii=False),
                 ),
             )
@@ -190,7 +193,7 @@ def _push_urgent(decisions, dry_run: bool) -> int:
 
 
 def _push_b(decisions, now: datetime, dry_run: bool) -> int:
-    """推 B 已签收，按 deadline 升序裁剪到当日剩余配额。返回成功数。"""
+    """推 B 已签收，按 deadline 升序裁剪到当日剩余配额，按供货商分组发送。"""
     b_decisions = [d for d in decisions if "B" in d.scenarios]
     if not b_decisions:
         return 0
@@ -203,59 +206,111 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
         log.info("B daily quota exhausted, skipping")
         return 0
 
-    # 按截止时间最紧迫（最小 deadline）排序；无 deadline 排最后
+    # 1. 按截止时间紧迫度排序选出配额内的候选
     def _sort_key(d):
         return (d.refund.deadline_at is None,
                 d.refund.deadline_at or datetime.max.replace(tzinfo=TIMEZONE))
     b_decisions.sort(key=_sort_key)
     selected = b_decisions[:quota]
 
-    # 预先批量渲染所有签收卡片（共用一个浏览器）
-    specs = []
+    # 2. 查供货商（仅对选中的候选）
+    order_ids = list({d.refund.order_id for d in selected if d.refund.order_id})
+    try:
+        supplier_map = weidian_supplier.fetch_suppliers(order_ids)
+    except Exception as e:
+        log.warning("supplier lookup failed: %s — 全部归为无供货商分组", e)
+        supplier_map = {}
     for d in selected:
-        log_info = d.logistics
-        if log_info is None:
-            continue
-        signed_time = (log_info.signed_at.strftime("%Y-%m-%d %H:%M")
-                       if log_info.signed_at else None)
-        # 从 trace_text 抠签收 context（短）
-        context = None
-        for line in (log_info.trace_text or "").splitlines():
-            if "签收" in line:
-                import re as _re
-                m = _re.search(r"\*\*[^*]*签收[^*]*\*\*\s*(.+)$", line)
-                if m:
-                    context = m.group(1).strip()
-                break
-        specs.append({
-            "carrier": log_info.carrier or "—",
-            "tracking_no": log_info.tracking_no,
-            "signed_time": signed_time,
-            "context": context,
-        })
+        key = (d.refund.order_id, d.refund.item_id or "")
+        d.refund.supplier_name = supplier_map.get(key)
+
+    # 3. 按供货商分组，组内仍按 deadline 排序
+    groups: dict[str | None, list] = {}
+    for d in selected:
+        groups.setdefault(d.refund.supplier_name, []).append(d)
+    for g in groups.values():
+        g.sort(key=_sort_key)
+
+    # 组顺序：按"组内最紧迫的那笔"的 deadline 排，紧迫的组排前
+    group_order = sorted(
+        groups.keys(),
+        key=lambda k: _sort_key(groups[k][0]),
+    )
+    log.info("B 分组: %s",
+             {k or "(无)": len(v) for k, v in groups.items()})
+
+    # 4. 渲染所有签收卡片（仍是按 refund 一张图）
+    specs = []
+    for sup in group_order:
+        for d in groups[sup]:
+            log_info = d.logistics
+            if log_info is None:
+                specs.append(None)
+                continue
+            signed_time = (log_info.signed_at.strftime("%Y-%m-%d %H:%M")
+                           if log_info.signed_at else None)
+            context = None
+            for line in (log_info.trace_text or "").splitlines():
+                if "签收" in line:
+                    import re as _re
+                    m = _re.search(r"\*\*[^*]*签收[^*]*\*\*\s*(.+)$", line)
+                    if m:
+                        context = m.group(1).strip()
+                    break
+            specs.append({
+                "carrier": log_info.carrier or "—",
+                "tracking_no": log_info.tracking_no,
+                "signed_time": signed_time,
+                "context": context,
+            })
 
     if dry_run:
-        for d, spec in zip(selected, specs):
-            log.info("[dry-run] B %s -> %s", d.refund.refund_id, spec.get("tracking_no"))
+        for sup in group_order:
+            log.info("[dry-run] B 供货商 %s 笔数 %d", sup or "(无)", len(groups[sup]))
+            for d in groups[sup]:
+                log.info("[dry-run]   %s tracking=%s",
+                         d.refund.refund_id,
+                         d.refund.return_tracking_no)
         return 0
 
-    cards = card_render.render_many(specs)
+    valid_specs = [s for s in specs if s is not None]
+    cards = card_render.render_many(valid_specs) if valid_specs else []
+    # 把 None 占位回填
+    card_iter = iter(cards)
+    full_cards: list = []
+    for s in specs:
+        full_cards.append(next(card_iter) if s is not None else None)
 
+    # 5. 按组发：组 header markdown + 组内每笔一张图
     n = 0
-    for d, card_path in zip(selected, cards):
-        payload = to_payload(d)
-        text = render_b(payload)
+    card_idx = 0
+    for sup in group_order:
+        members = groups[sup]
+        payloads = [to_payload(d) for d in members]
+        header = render_b_group(sup, payloads)
         try:
-            wecom.send_markdown(text)
-            if card_path and Path(card_path).exists():
-                try:
-                    wecom.send_image(card_path)
-                except Exception as e:
-                    log.warning("card image send failed for %s: %s", payload.refund_id, e)
-            _record_push(payload.refund_id, "B", text, str(card_path) if card_path else None)
-            n += 1
+            wecom.send_markdown(header)
         except Exception as e:
-            log.exception("B push failed %s: %s", payload.refund_id, e)
+            log.exception("B group header send failed (%s): %s", sup, e)
+            card_idx += len(members)
+            continue
+
+        for d, payload in zip(members, payloads):
+            card_path = full_cards[card_idx]
+            card_idx += 1
+            try:
+                if card_path and Path(card_path).exists():
+                    try:
+                        wecom.send_image(card_path)
+                    except Exception as e:
+                        log.warning("card image send failed for %s: %s", payload.refund_id, e)
+                _record_push(
+                    payload.refund_id, "B", header,
+                    str(card_path) if card_path else None,
+                )
+                n += 1
+            except Exception as e:
+                log.exception("B push failed %s: %s", payload.refund_id, e)
     return n
 
 

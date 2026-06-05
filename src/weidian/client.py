@@ -122,6 +122,7 @@ def parse_refund_list_response(payload: dict, tab_label: str) -> list[RefundReco
         if not refund_id or not order_id:
             continue
         first_item = (it.get("itemInfoList") or [{}])[0]
+        item_id = str(first_item.get("itemId") or "") or None
         item_title = first_item.get("itemTitle") or ""
         sku = first_item.get("itemSkuTitle")
         if sku:
@@ -138,6 +139,7 @@ def parse_refund_list_response(payload: dict, tab_label: str) -> list[RefundReco
             receiver_name=it.get("buyerName"),
             receiver_phone=it.get("buyerTelephone"),
             item_title=item_title,
+            item_id=item_id,
             return_tracking_no=None,  # TODO: 待详情接口补
             detail_url=REFUND_DETAIL_PAGE_URL_FMT.format(refund_no=refund_id),
         ))

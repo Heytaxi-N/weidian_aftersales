@@ -83,8 +83,9 @@ def _mk_b_decision(rid: str, deadline_offset_h: float) -> Decision:
 
 
 def test_b_push_respects_quota(fresh_db, monkeypatch):
-    # mock 渲染和推送，只测筛选 + quota 逻辑
+    # mock 渲染、推送、供货商查询，只测筛选 + quota 逻辑
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
+    monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
     sent_text: list[str] = []
     monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: sent_text.append(m))
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
@@ -107,13 +108,9 @@ def test_b_push_respects_quota(fresh_db, monkeypatch):
 
 def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
-    sent_b_ids: list[str] = []
-    def fake_send_md(m):
-        # 抽取 "买家，退，运单号" → tracking_no 抠出来
-        parts = m.split("，")
-        if len(parts) == 3:
-            sent_b_ids.append(parts[2].strip())
-    monkeypatch.setattr(runner.wecom, "send_markdown", fake_send_md)
+    monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
+    sent_md: list[str] = []
+    monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: sent_md.append(m))
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
 
     # 候选：5 笔，deadline 分别 100h / 50h / 10h / 30h / 80h
@@ -136,11 +133,21 @@ def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
     runner._push_b(decisions, NOW, dry_run=False)
 
     # 应当按 deadline 升序取前 3：C(10), D(30), B(50)
-    assert sent_b_ids == ["TNC", "TND", "TNB"], sent_b_ids
+    # 所有归为"无供货商"组 → 一条 group markdown 含 3 行
+    assert len(sent_md) == 1, f"应只有一条 group markdown，实际 {len(sent_md)}"
+    body = sent_md[0]
+    pos_c = body.find("TNC")
+    pos_d = body.find("TND")
+    pos_b = body.find("TNB")
+    assert pos_c >= 0 and pos_d >= 0 and pos_b >= 0
+    assert pos_c < pos_d < pos_b, f"顺序错: TNC={pos_c} TND={pos_d} TNB={pos_b}"
+    # 不应包含 A/E（被裁掉）
+    assert "TNA" not in body and "TNE" not in body
 
 
 def test_b_push_quota_exhausted(fresh_db, monkeypatch):
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
+    monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
     monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: None)
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
 

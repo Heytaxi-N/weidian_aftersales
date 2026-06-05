@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS order_snapshots (
     receiver_name      TEXT,
     receiver_phone     TEXT,
     item_title         TEXT,
+    item_id            TEXT,
     return_tracking_no TEXT,
+    supplier_name      TEXT,
     detail_url         TEXT,
     raw_json           TEXT,
     PRIMARY KEY (snapshot_at, refund_id)
@@ -68,9 +70,21 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+_MIGRATIONS = [
+    # 历史 schema 加列，幂等执行（已存在则忽略错误）
+    "ALTER TABLE order_snapshots ADD COLUMN supplier_name TEXT",
+    "ALTER TABLE order_snapshots ADD COLUMN item_id TEXT",
+]
+
+
 def init_schema(path: Path | str | None = None) -> None:
     with connect(path) as conn:
         conn.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # 列已存在
 
 
 @contextmanager
