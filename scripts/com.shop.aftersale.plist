@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shop.aftersale</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>HOUR=$(date +%H); if [ "$HOUR" = "09" ]; then ARGS="--with-daily-report"; else ARGS=""; fi; cd /Users/nick/Downloads/售后管理 && ./scripts/run.sh $ARGS</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nick/Downloads/售后管理</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nick/Downloads/售后管理/data/logs/launchd.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/nick/Downloads/售后管理/data/logs/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

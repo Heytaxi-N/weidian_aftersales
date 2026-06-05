@@ -1,0 +1,33 @@
+[project]
+name = "weidian-aftersale"
+version = "0.1.0"
+description = "微店售后提醒+预处理+管理系统"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.48",
+    "httpx>=0.27",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1",
+    "sqlite-utils>=3.37",
+    "python-dotenv>=1.0",
+    "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "freezegun>=1.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
