@@ -72,20 +72,48 @@ def _write_cache(conn: sqlite3.Connection, **kw):
     )
 
 
-def _parse_signed(events: list[dict]) -> datetime | None:
-    """events: 来自 result.data_json, 已按时间倒序。找最早的"已签收"事件取时间。"""
+# 各家快递的签收 scanType 值。京东用"取件运单妥投"，其他常见就是含"签收"。
+SIGNED_SCAN_TYPES = ("签收", "妥投", "投妥", "已收件")
+
+
+def _parse_event_time(ev: dict) -> datetime | None:
+    ts = (ev.get("ftime") or ev.get("time") or "").strip()
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+    except ValueError:
+        return None
+
+
+def _parse_signed(events: list[dict], result: dict | None = None) -> datetime | None:
+    """找最早的签收事件时间。
+
+    优先级：
+      1. events 中 scanType 含已知签收关键字（"签收"/"妥投"等），取最早
+      2. result.ischeck=True 但 #1 没匹配上 → fallback 用 result.last_time（不同
+         快递公司用词差异大，ischeck 是权威信号）
+    """
     signed_times: list[datetime] = []
     for ev in events:
         scan = (ev.get("scanType") or "").strip()
-        if "签收" not in scan:
+        if not any(kw in scan for kw in SIGNED_SCAN_TYPES):
             continue
-        ts = (ev.get("ftime") or ev.get("time") or "").strip()
-        try:
-            dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+        dt = _parse_event_time(ev)
+        if dt:
             signed_times.append(dt)
-        except ValueError:
-            continue
-    return min(signed_times) if signed_times else None
+
+    if signed_times:
+        return min(signed_times)
+
+    # Fallback：ischeck=True 但 scanType 没命中关键字（罕见但比如京东可能用别的词）
+    if result and result.get("ischeck"):
+        last_time = (result.get("last_time") or "").strip()
+        if last_time:
+            try:
+                return datetime.strptime(last_time, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TIMEZONE)
+            except ValueError:
+                pass
+
+    return None
 
 
 def _format_trace_text(carrier: str, tracking_no: str, events: list[dict]) -> str:
@@ -141,7 +169,7 @@ def _query_one(client: httpx.Client, express_no: str, express_id: int, wdtoken: 
     result = data.get("result") or {}
     carrier = result.get("express_company") or ""
     events = result.get("data_json") or []
-    signed_at = _parse_signed(events)
+    signed_at = _parse_signed(events, result)
     is_check = bool(result.get("ischeck"))
 
     if signed_at is not None or is_check:

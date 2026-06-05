@@ -44,6 +44,35 @@ def test_parse_signed_picks_earliest():
     assert dt and dt.day == 1
 
 
+def test_parse_signed_jd_tuotuo():
+    """京东用「取件运单妥投」作为 scanType，应识别为签收。"""
+    events = [
+        {"scanType": "取件运单妥投", "ftime": "2026-05-31 03:21:03"},
+        {"scanType": "配送员收货", "ftime": "2026-05-30 08:30:25"},
+    ]
+    dt = _parse_signed(events)
+    assert dt is not None
+    assert dt.day == 31 and dt.hour == 3
+
+
+def test_parse_signed_fallback_to_last_time_when_ischeck():
+    """ischeck=True 但 scanType 无已知关键字时，用 result.last_time 兜底。"""
+    events = [
+        {"scanType": "奇怪的承运商专用词", "ftime": "2026-06-03 12:00:00"},
+    ]
+    # events 解析失败
+    assert _parse_signed(events) is None
+    # 但传入 result 的 ischeck + last_time 应当 fallback
+    dt = _parse_signed(events, result={"ischeck": True, "last_time": "2026-06-03 12:00:00"})
+    assert dt is not None and dt.day == 3
+
+
+def test_parse_signed_no_fallback_when_ischeck_false():
+    events = [{"scanType": "派件中", "ftime": "2026-06-01 10:00:00"}]
+    dt = _parse_signed(events, result={"ischeck": False, "last_time": "2026-06-01 10:00:00"})
+    assert dt is None
+
+
 def test_format_trace_text():
     body = _load_dump()
     events = body["result"]["data_json"]
