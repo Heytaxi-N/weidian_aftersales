@@ -87,8 +87,10 @@ def evaluate(
 
         scenarios: list[str] = []
 
+        # A/A2 临期紧急：不做 dedup —— 只要还在 ≤48h 区间，每轮都推，
+        # 保证紧迫单子持续在店主眼前直到处理掉
         time_scn = _classify_time(hours_left)
-        if time_scn and (r.refund_id, time_scn) not in already_pushed:
+        if time_scn:
             scenarios.append(time_scn)
 
         logistics: LogisticsInfo | None = None
