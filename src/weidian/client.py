@@ -154,19 +154,23 @@ def fetch_refund_detail(client: httpx.Client, refund_no: str, wdtoken: str) -> d
         return None
 
 
-def extract_tracking_info(detail: dict | None) -> tuple[str | None, str | None]:
-    """返回 (express_no, express_company)。"""
+def extract_tracking_info(detail: dict | None) -> tuple[str | None, str | None, int | None]:
+    """返回 (express_no, express_company, express_type)。
+    express_type 是微店内部承运商 ID（如 韵达=6），调 trace 接口需要带。"""
     if not detail:
-        return None, None
+        return None, None, None
     result = detail.get("result") or {}
     progress = result.get("refundProgress") or {}
     basic = progress.get("refundBasicInfo") or {}
     express_no = (basic.get("expressNo") or "").strip() or None
+    express_type = basic.get("expressType")
+    if not isinstance(express_type, int):
+        express_type = None
     company = None
     active = (progress.get("activeRefundRecord") or {}).get("content") or {}
     if active.get("expressCompany"):
         company = active["expressCompany"].strip() or None
-    return express_no, company
+    return express_no, company, express_type
 
 
 def extract_buyer_return_info(detail: dict | None) -> tuple[str | None, str | None, str | None]:
@@ -224,8 +228,9 @@ def fetch_all_refunds(*, fetch_details: bool = True) -> list[RefundRecord]:
                 detail = fetch_refund_detail(client, r.refund_id, wdtoken)
                 if detail is None:
                     continue
-                tracking_no, _carrier = extract_tracking_info(detail)
+                tracking_no, _carrier, express_type = extract_tracking_info(detail)
                 r.return_tracking_no = tracking_no
+                r.return_express_type = express_type
                 # 退货是买家寄给商家，"收件人"信息其实就是买家自己
                 rname, rphone, _addr = extract_buyer_return_info(detail)
                 if rname:

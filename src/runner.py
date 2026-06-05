@@ -18,7 +18,7 @@ from pathlib import Path
 
 from src.config import LOGS_DIR, TIMEZONE
 from src.db import get_conn
-from src.logistics import sogou as logistics_provider
+from src.logistics import weidian_trace as logistics_provider
 from src.notify import wecom
 from src.notify.templates import render_push
 from src.rules.engine import (
@@ -85,17 +85,20 @@ def _record_push(refund_id: str, scenario: str, message: str, screenshot: str | 
 
 
 def _gather_logistics(refunds: list[RefundRecord]) -> dict[str, LogisticsInfo]:
-    tracking_nos: list[str] = []
+    pairs: list[tuple[str, int]] = []
     seen: set[str] = set()
     for r in refunds:
         if r.status != STATUS_PENDING_MERCHANT_RECEIVE or not r.return_tracking_no:
             continue
         if r.return_tracking_no in seen:
             continue
+        if not r.return_express_type:
+            log.debug("skip %s (no express_type)", r.return_tracking_no)
+            continue
         seen.add(r.return_tracking_no)
-        tracking_nos.append(r.return_tracking_no)
+        pairs.append((r.return_tracking_no, r.return_express_type))
 
-    results = logistics_provider.query_many(tracking_nos)
+    results = logistics_provider.query_pairs(pairs)
     out: dict[str, LogisticsInfo] = {}
     for t, rec in results.items():
         signed_at = datetime.fromisoformat(rec["signed_at"]) if rec.get("signed_at") else None
@@ -103,6 +106,8 @@ def _gather_logistics(refunds: list[RefundRecord]) -> dict[str, LogisticsInfo]:
             tracking_no=t,
             signed_at=signed_at,
             screenshot_path=rec.get("screenshot_path"),
+            carrier=rec.get("carrier"),
+            trace_text=rec.get("raw_text"),
         )
     return out
 

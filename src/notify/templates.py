@@ -27,6 +27,8 @@ class PushPayload:
     signed_at: datetime | None = None
     screenshot_path: str | None = None
     detail_url: str | None = None
+    carrier: str | None = None
+    trace_text: str | None = None
 
 
 def _header(scenarios: list[str]) -> str:
@@ -54,9 +56,14 @@ PUSH_TEMPLATE = env.from_string("""\
 **📦 退货物流**
 > 收件人：{{ p.receiver_name or '—' }} / {{ p.receiver_phone or '—' }}
 > 商品：{{ p.item_title or '—' }}
+> 承运商：{{ p.carrier or '—' }}
 > 运单号：`{{ p.return_tracking_no or '—' }}`
 {% if p.signed_at %}
-> 签收时间：{{ p.signed_at.strftime('%Y-%m-%d %H:%M') }}
+> 签收时间：<font color="info">{{ p.signed_at.strftime('%Y-%m-%d %H:%M') }}</font>
+{% endif %}
+{% if p.trace_text %}
+
+{{ p.trace_text }}
 {% endif %}
 {% endif %}
 {% if p.detail_url %}

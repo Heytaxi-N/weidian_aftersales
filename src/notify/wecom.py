@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -12,6 +14,20 @@ from src.config import WECOM_WEBHOOK_URL
 log = logging.getLogger(__name__)
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024  # 企业微信图片消息上限 2MB
+MIN_INTERVAL_SECONDS = 3.2          # 企业微信群机器人限频 20 条/分钟，3.2s 间隔安全
+
+_last_send_at: float = 0.0
+_send_lock = threading.Lock()
+
+
+def _throttle() -> None:
+    """单进程内的发送节流，避免 errcode=45009。"""
+    global _last_send_at
+    with _send_lock:
+        wait = MIN_INTERVAL_SECONDS - (time.monotonic() - _last_send_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_send_at = time.monotonic()
 
 
 class WeComError(RuntimeError):
@@ -21,6 +37,7 @@ class WeComError(RuntimeError):
 def _post(payload: dict) -> dict:
     if not WECOM_WEBHOOK_URL:
         raise WeComError("WECOM_WEBHOOK_URL is empty — set it in .env")
+    _throttle()
     r = httpx.post(WECOM_WEBHOOK_URL, json=payload, timeout=15)
     r.raise_for_status()
     data = r.json()

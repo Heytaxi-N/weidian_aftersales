@@ -29,6 +29,7 @@ class RefundRecord:
     receiver_phone: str | None = None
     item_title: str | None = None
     return_tracking_no: str | None = None
+    return_express_type: int | None = None   # 微店内部承运商 ID，调 trace 接口要用
     detail_url: str | None = None
 
 
@@ -37,6 +38,8 @@ class LogisticsInfo:
     tracking_no: str
     signed_at: datetime | None
     screenshot_path: str | None = None
+    carrier: str | None = None
+    trace_text: str | None = None   # 可选：轨迹文本（用于嵌入推送消息）
 
 
 @dataclass
@@ -126,4 +129,6 @@ def to_payload(d: Decision) -> PushPayload:
         signed_at=d.logistics.signed_at if d.logistics else None,
         screenshot_path=d.logistics.screenshot_path if d.logistics else None,
         detail_url=r.detail_url,
+        carrier=d.logistics.carrier if d.logistics else None,
+        trace_text=d.logistics.trace_text if d.logistics else None,
     )
