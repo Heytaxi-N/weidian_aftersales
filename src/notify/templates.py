@@ -42,39 +42,80 @@ def _header(scenarios: list[str]) -> str:
     return " · ".join(parts) if parts else "📣 提醒"
 
 
-PUSH_TEMPLATE = env.from_string("""\
+# A/A2 临期紧急提醒模板（去链接，只保留店主行动需要的信息）
+URGENT_TEMPLATE = env.from_string("""\
 {{ header }}
-> 退款单：`{{ p.refund_id }}` (订单 #{{ p.order_id }})
+> 退款单：`{{ p.refund_id }}`
+> 订单：`{{ p.order_id }}`
 > 买家：{{ p.buyer_name or '—' }} / {{ p.buyer_phone or '—' }}
 > 申请类型：{{ p.refund_type or '—' }}
 > 当前节点：<font color="warning">{{ p.status or '—' }}</font>
 {% if p.hours_left is not none %}
 > 剩余时间：<font color="{{ 'warning' if 'A2' in p.scenarios else 'comment' }}">{{ '%.1f' % p.hours_left }} 小时</font>
 {% endif %}
-{% if 'B' in p.scenarios %}
-
-**📦 退货物流**
-> 收件人：{{ p.receiver_name or '—' }} / {{ p.receiver_phone or '—' }}
-> 商品：{{ p.item_title or '—' }}
-> 承运商：{{ p.carrier or '—' }}
-> 运单号：`{{ p.return_tracking_no or '—' }}`
-{% if p.signed_at %}
-> 签收时间：<font color="info">{{ p.signed_at.strftime('%Y-%m-%d %H:%M') }}</font>
-{% endif %}
-{% if p.trace_text %}
-
-{{ p.trace_text }}
-{% endif %}
-{% endif %}
-{% if p.detail_url %}
-
-[查看微店详情]({{ p.detail_url }})
-{% endif %}
 """)
 
 
+def render_urgent(p: PushPayload) -> str:
+    """A/A2 临期/紧急模板。如果 refund 同时命中 B，B 走单独消息流，这里只渲染时间维度。"""
+    scenarios = [s for s in p.scenarios if s in ("A", "A2")]
+    return URGENT_TEMPLATE.render(p=p, header=_header(scenarios)).strip()
+
+
+# B 已签收紧凑模板：给店主一行能直接复制转发上游的信息
+B_TEMPLATE = env.from_string("""\
+{{ p.buyer_name or '—' }}，退，{{ p.return_tracking_no or '—' }}
+""")
+
+
+def render_b(p: PushPayload) -> str:
+    return B_TEMPLATE.render(p=p).strip()
+
+
+# 兼容旧接口（dashboard 等地方可能引用），保留 render_push 走 URGENT_TEMPLATE
 def render_push(p: PushPayload) -> str:
-    return PUSH_TEMPLATE.render(p=p, header=_header(p.scenarios)).strip()
+    return render_urgent(p)
+
+
+# 概览模板
+@dataclass
+class OverviewStats:
+    wait_seller_handle: int           # 待商家处理 总数
+    wait_seller_handle_urgent: int    # 其中临期 ≤48h
+    wait_seller_receive: int          # 待商家收货 总数
+    wait_seller_receive_urgent: int   # 其中临期 ≤48h
+    wait_buyer: int                   # 待买家处理
+    wait_customer: int                # 客服介入
+
+
+def _overview_line(label: str, total: int, urgent: int | None = None) -> str:
+    if total == 0:
+        return ""
+    if urgent and urgent > 0:
+        return f"> {label}：{total} (临期 {urgent})"
+    return f"> {label}：{total}"
+
+
+OVERVIEW_TEMPLATE = env.from_string("""\
+📊 **售后概览**
+
+{{ lines }}
+""")
+
+
+def render_overview(s: OverviewStats) -> str:
+    lines: list[str] = []
+    for line in (
+        _overview_line("待商家处理", s.wait_seller_handle, s.wait_seller_handle_urgent),
+        _overview_line("待商家收货", s.wait_seller_receive, s.wait_seller_receive_urgent),
+        _overview_line("待买家处理", s.wait_buyer),
+        _overview_line("客服介入", s.wait_customer),
+    ):
+        if line:
+            lines.append(line)
+    if not lines:
+        lines = ["> 暂无待办 ✅"]
+    return OVERVIEW_TEMPLATE.render(lines="\n".join(lines)).strip()
 
 
 @dataclass

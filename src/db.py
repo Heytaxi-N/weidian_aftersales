@@ -59,20 +59,22 @@ CREATE TABLE IF NOT EXISTS run_log (
 """
 
 
-def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(path))
+def connect(path: Path | str | None = None) -> sqlite3.Connection:
+    # 在调用时解析全局 DB_PATH，方便测试通过 monkeypatch 改写
+    import src.db as _db_mod
+    conn = sqlite3.connect(str(path or _db_mod.DB_PATH))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
-def init_schema(path: Path | str = DB_PATH) -> None:
+def init_schema(path: Path | str | None = None) -> None:
     with connect(path) as conn:
         conn.executescript(SCHEMA)
 
 
 @contextmanager
-def get_conn(path: Path | str = DB_PATH) -> Iterator[sqlite3.Connection]:
+def get_conn(path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
     conn = connect(path)
     try:
         yield conn
