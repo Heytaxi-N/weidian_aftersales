@@ -26,7 +26,7 @@ echo
 echo "=== 4. 物流查询（用一个随便编的运单号，验证 Playwright 能跑通即可） ==="
 .venv/bin/python -c "
 from src.logistics.sogou import query
-r = query('YT2548045394122', use_cache=False, headless=True)
+r = query('YT0000000000001', use_cache=False, headless=True)
 print('状态:', r.get('status'))
 print('承运商:', r.get('carrier'))
 print('截图:', r.get('screenshot_path'))

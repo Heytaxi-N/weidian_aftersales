@@ -9,8 +9,7 @@
 用法：
     python -m src.weidian.trace_dump <refund_no> <order_id>
 
-例：
-    python -m src.weidian.trace_dump 144115509392416136 847408852523400
+(refund_no 和 order_id 可在微店退款管理页面看到)
 """
 from __future__ import annotations
 
