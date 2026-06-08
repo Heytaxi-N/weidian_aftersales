@@ -9,7 +9,7 @@
     <array>
         <string>/bin/bash</string>
         <string>-lc</string>
-        <string>HOUR=$(date +%H); if [ "$HOUR" = "09" ]; then ARGS="--with-daily-report"; else ARGS=""; fi; cd /Users/nick/Downloads/售后管理 && ./scripts/run.sh $ARGS</string>
+        <string>HOUR=$(date +%H); if [ "$HOUR" = "09" ]; then ARGS="--with-daily-report"; else ARGS=""; fi; cd /Users/nick/projects/weidian_aftersales && ./scripts/run.sh $ARGS</string>
     </array>
 
     <key>StartCalendarInterval</key>
@@ -25,13 +25,13 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/nick/Downloads/售后管理</string>
+    <string>/Users/nick/projects/weidian_aftersales</string>
 
     <key>StandardOutPath</key>
-    <string>/Users/nick/Downloads/售后管理/data/logs/launchd.out.log</string>
+    <string>/Users/nick/projects/weidian_aftersales/data/logs/launchd.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/nick/Downloads/售后管理/data/logs/launchd.err.log</string>
+    <string>/Users/nick/projects/weidian_aftersales/data/logs/launchd.err.log</string>
 
     <key>RunAtLoad</key>
     <false/>
