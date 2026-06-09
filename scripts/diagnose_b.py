@@ -64,8 +64,17 @@ def diagnose(refund_id: str) -> str:
             return "该单从未被系统抓取过 — 无法判定是否应推 B"
 
         snap = dict(snap)
-        print(f"{OK} 1. 找到 snapshot（最新 snapshot_at={_fmt_dt(snap['snapshot_at'])}）")
+        global_latest = conn.execute(
+            "SELECT MAX(snapshot_at) AS mx FROM order_snapshots"
+        ).fetchone()["mx"]
+        is_latest = snap["snapshot_at"] == global_latest
+        stale_mark = "" if is_latest else \
+            f"（⚠ 不在最新抓取里 — 全局最新={_fmt_dt(global_latest)}，"\
+            f"此单可能已被店主处理或状态已变）"
+        print(f"{OK} 1. 找到 snapshot（snapshot_at={_fmt_dt(snap['snapshot_at'])}）{stale_mark}")
         print(f"     order_id={snap['order_id']} item={snap.get('item_title') or '—'}")
+        if not is_latest:
+            reasons.append("已不在最新一次抓取里（疑似已处理）")
 
         # 2. 状态
         status = snap.get("status")
@@ -133,27 +142,34 @@ def diagnose(refund_id: str) -> str:
         # 6. 今日 B 配额 + 排序位置
         used = _b_quota_used_today(now)
         quota_left = max(0, B_DAILY_QUOTA - used)
-        print(f"{INFO} 6. 今日 B 配额：已用 {used}/{B_DAILY_QUOTA}，剩余 {quota_left}")
+        if quota_left == 0:
+            print(f"{NO} 6. 今日 B 配额已耗尽（{used}/{B_DAILY_QUOTA}）— "
+                  f"今天不会再推任何 B，等明天 00:00 配额重置")
+            reasons.append(f"今日 B 配额已耗尽（{used}/{B_DAILY_QUOTA}）")
+        else:
+            print(f"{INFO} 6. 今日 B 配额：已用 {used}/{B_DAILY_QUOTA}，剩余 {quota_left}")
 
         # 估算此单在今日 B 候选里的 deadline 排名
         # （所有最新 snapshot 中：待商家收货 + 有 tracking + 在 logistics_cache 已签收 ≥2 天 + 未推过 B）
         today_start = datetime.combine(now.date(), dtime(0, 0), tzinfo=TIMEZONE)
-        # B 候选池：状态=待商家收货 + 有 tracking + 物流缓存里签收 ≥ 2 天
-        # （B 已无引擎层去重，候选池不再排除已推过的）
+        # B 候选池：限定到「全局最新一次抓取」里出现的 refund，
+        # 避免把已被店主处理、早就不在 fetch 结果里的 stale refund 统计进来。
+        # 条件：状态=待商家收货 + 有 tracking + 物流缓存里签收 ≥ 2 天
+        latest_row = conn.execute(
+            "SELECT MAX(snapshot_at) AS mx FROM order_snapshots"
+        ).fetchone()
+        latest_snapshot_at = latest_row["mx"]
         candidates = conn.execute("""
             SELECT s.refund_id, s.deadline_at
             FROM order_snapshots s
-            JOIN (
-                SELECT refund_id, MAX(snapshot_at) AS mx
-                FROM order_snapshots
-                GROUP BY refund_id
-            ) m ON s.refund_id = m.refund_id AND s.snapshot_at = m.mx
             JOIN logistics_cache l ON l.tracking_no = s.return_tracking_no
-            WHERE s.status = ?
+            WHERE s.snapshot_at = ?
+              AND s.status = ?
               AND s.return_tracking_no IS NOT NULL
               AND l.signed_at IS NOT NULL
               AND l.signed_at <= ?
         """, (
+            latest_snapshot_at,
             STATUS_PENDING_MERCHANT_RECEIVE,
             (now - timedelta(days=SIGNED_THRESHOLD_DAYS)).isoformat(),
         )).fetchall()
@@ -172,11 +188,12 @@ def diagnose(refund_id: str) -> str:
             print(f"{INFO}    此单未出现在今日 B 候选池中（条件不满足，见上文）")
         else:
             print(f"{INFO}    此单在今日 B 候选池中按 deadline 排序：第 {rank + 1}/{total}")
-            if rank + 1 > B_DAILY_QUOTA:
-                print(f"{NO}    rank {rank + 1} > 每日配额 {B_DAILY_QUOTA}，"
-                      f"会被裁掉")
+            # 只有配额还有剩时才比较 rank vs quota_left
+            if quota_left > 0 and rank + 1 > quota_left:
+                print(f"{NO}    rank {rank + 1} > 今日剩余配额 {quota_left}，"
+                      f"本轮会被裁掉")
                 reasons.append(
-                    f"deadline 排名 {rank + 1} 超过每日配额 {B_DAILY_QUOTA}"
+                    f"deadline 排名 {rank + 1} 超过剩余配额 {quota_left}"
                 )
 
         # 7. A/A2 推送历史（信息项）
