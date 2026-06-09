@@ -80,12 +80,6 @@ def _write_snapshot(refunds: list[RefundRecord], snapshot_at: str) -> None:
             )
 
 
-def _load_pushed() -> set[tuple[str, str]]:
-    with get_conn() as conn:
-        return {(row["refund_id"], row["scenario"])
-                for row in conn.execute("SELECT refund_id, scenario FROM pushed_records")}
-
-
 def _record_push(refund_id: str, scenario: str, message: str, screenshot: str | None) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -358,8 +352,7 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
         log.info("logistics queried for %d tracking numbers", len(logistics))
 
     # 4. 规则判定
-    already = _load_pushed() if not dry_run else set()
-    decisions = evaluate(pending, logistics, already, started)
+    decisions = evaluate(pending, logistics, started)
     log.info("decisions: %d push payloads", len(decisions))
 
     # 5. 发概览（即使没有提醒也发，让店主每天看到全局）

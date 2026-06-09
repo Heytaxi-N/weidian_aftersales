@@ -66,15 +66,15 @@ def _classify_time(hours_left: float | None) -> str | None:
 def evaluate(
     refunds: Iterable[RefundRecord],
     logistics_by_tracking: dict[str, LogisticsInfo],
-    already_pushed: set[tuple[str, str]],
     now: datetime,
 ) -> list[Decision]:
-    """对每个 refund 计算应推送的场景集合（合并 + 去重）。
+    """对每个 refund 计算应推送的场景集合（合并）。
 
     - refunds: 当前快照中所有待商家状态的退款
     - logistics_by_tracking: tracking_no -> 查询结果
-    - already_pushed: 数据库里已有的 (refund_id, scenario) 元组集合
     - now: 当前时间
+
+    A/A2/B 均不在引擎层去重；B 的重复轰炸由 runner 的每日配额兜底。
     """
     decisions: list[Decision] = []
     for r in refunds:
@@ -104,9 +104,6 @@ def evaluate(
                 logistics.signed_at is not None
                 and (now - logistics.signed_at) >= timedelta(days=SIGNED_THRESHOLD_DAYS)
             ):
-                # B 不做引擎层去重：签收 ≥2 天且未确认的单子每轮都进候选，
-                # 重复轰炸由 runner 的「每日配额 B_DAILY_QUOTA」兜底。
-                # already_pushed 参数当前未被消费，但保留接口以便未来扩展场景去重。
                 scenarios.append("B")
 
         if scenarios:
