@@ -1,4 +1,4 @@
-"""验证 B 配额逻辑：今天已推 N 条 → 本轮裁剪到 max(0, 10-N) 条。"""
+"""验证 B 配额逻辑：今天已推 N 条 → 本轮裁剪到 max(0, 20-N) 条。"""
 from __future__ import annotations
 
 import sqlite3
@@ -86,13 +86,13 @@ def test_b_push_respects_quota(fresh_db, monkeypatch):
     # mock 渲染、推送、供货商查询，只测筛选 + quota 逻辑
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
     monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
-    sent_text: list[str] = []
-    monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: sent_text.append(m))
+    monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: None)
+    monkeypatch.setattr(runner.wecom, "send_text", lambda m: None)
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
 
-    # 今天已推 7 条
+    # 今天已推 17 条
     with db.get_conn(fresh_db) as c:
-        for i in range(7):
+        for i in range(17):
             c.execute(
                 "INSERT INTO pushed_records(refund_id, scenario, pushed_at, message_text) "
                 "VALUES (?,?,?,?)",
@@ -103,14 +103,16 @@ def test_b_push_respects_quota(fresh_db, monkeypatch):
     decisions = [_mk_b_decision(f"R{i}", float(50 + i)) for i in range(10)]
 
     pushed = runner._push_b(decisions, NOW, dry_run=False)
-    assert pushed == 3, f"剩余配额 10-7=3，应当只推 3 条，实际 {pushed}"
+    assert pushed == 3, f"剩余配额 20-17=3，应当只推 3 条，实际 {pushed}"
 
 
 def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
     monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
     sent_md: list[str] = []
+    sent_text: list[str] = []
     monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: sent_md.append(m))
+    monkeypatch.setattr(runner.wecom, "send_text", lambda m: sent_text.append(m))
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
 
     # 候选：5 笔，deadline 分别 100h / 50h / 10h / 30h / 80h
@@ -122,9 +124,9 @@ def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
         _mk_b_decision("E", 80),
     ]
 
-    # 配额 3
+    # 配额 3：今天已推 20-3=17 条
     with db.get_conn(fresh_db) as c:
-        for i in range(7):
+        for i in range(17):
             c.execute(
                 "INSERT INTO pushed_records(refund_id, scenario, pushed_at, message_text) "
                 "VALUES (?,?,?,?)",
@@ -133,11 +135,12 @@ def test_b_push_picks_most_urgent_first(fresh_db, monkeypatch):
     runner._push_b(decisions, NOW, dry_run=False)
 
     # 应当按 deadline 升序取前 3：C(10), D(30), B(50)
-    # 所有归为"无供货商"组 → 1 条组头 + 1 条多行 markdown（3 笔合并）
-    assert len(sent_md) == 2, f"应有 1 组头 + 1 条多行 = 2 条 markdown，实际 {len(sent_md)}"
+    # 所有归为"无供货商"组 → 1 条组头 markdown + 1 条多行 text（3 笔合并）
+    assert len(sent_md) == 1, f"应有 1 条组头 markdown，实际 {len(sent_md)}"
     assert "无供货商" in sent_md[0] and "3 笔" in sent_md[0]
-    # 多行 markdown 里顺序按 deadline 升序：C → D → B
-    body = sent_md[1]
+    assert len(sent_text) == 1, f"应有 1 条多行 text（组内合并），实际 {len(sent_text)}"
+    # 多行 text 里顺序按 deadline 升序：C → D → B
+    body = sent_text[0]
     pos_c = body.find("TNC")
     pos_d = body.find("TND")
     pos_b = body.find("TNB")
@@ -151,10 +154,11 @@ def test_b_push_quota_exhausted(fresh_db, monkeypatch):
     monkeypatch.setattr(runner.card_render, "render_many", lambda specs: [None] * len(specs))
     monkeypatch.setattr(runner.weidian_supplier, "fetch_suppliers", lambda ids: {})
     monkeypatch.setattr(runner.wecom, "send_markdown", lambda m: None)
+    monkeypatch.setattr(runner.wecom, "send_text", lambda m: None)
     monkeypatch.setattr(runner.wecom, "send_image", lambda p: None)
 
     with db.get_conn(fresh_db) as c:
-        for i in range(10):
+        for i in range(20):
             c.execute(
                 "INSERT INTO pushed_records(refund_id, scenario, pushed_at, message_text) "
                 "VALUES (?,?,?,?)",

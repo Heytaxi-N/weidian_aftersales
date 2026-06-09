@@ -42,7 +42,7 @@ from src.weidian import overview as weidian_overview
 
 log = logging.getLogger("runner")
 
-B_DAILY_QUOTA = 10
+B_DAILY_QUOTA = 20
 
 
 def setup_logging() -> None:
@@ -295,10 +295,11 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
             card_idx += len(members)
             continue
 
-        # 组内所有笔合并一条 markdown
+        # 组内所有笔合并一条 text（用 text 而非 markdown，便于店主转发到微信。
+        # render_b 输出本就是纯文本，无格式损失）
         lines_md = "\n".join(render_b(p) for p in payloads)
         try:
-            wecom.send_markdown(lines_md)
+            wecom.send_text(lines_md)
         except Exception as e:
             log.exception("B group lines send failed (%s): %s", sup, e)
             card_idx += len(members)
