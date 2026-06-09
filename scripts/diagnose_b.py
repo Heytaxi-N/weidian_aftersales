@@ -118,18 +118,17 @@ def diagnose(refund_id: str) -> str:
         else:
             print(f"{INFO} 4. 跳过物流查询（无退货单号）")
 
-        # 5. B 历史推送
-        b_row = conn.execute(
-            "SELECT pushed_at, message_text FROM pushed_records "
-            "WHERE refund_id = ? AND scenario = 'B'",
+        # 5. B 历史推送（仅信息项 —— B 已取消引擎层去重，可重复推）
+        b_rows = conn.execute(
+            "SELECT pushed_at FROM pushed_records "
+            "WHERE refund_id = ? AND scenario = 'B' ORDER BY pushed_at",
             (refund_id,),
-        ).fetchone()
-        if b_row:
-            print(f"{NO} 5. B 已推过（pushed_at={_fmt_dt(b_row['pushed_at'])}），"
-                  f"B 终身只推一次")
-            reasons.append(f"B 已推过（{_fmt_dt(b_row['pushed_at'])}）")
+        ).fetchall()
+        if b_rows:
+            times = ", ".join(_fmt_dt(r["pushed_at"]) for r in b_rows)
+            print(f"{INFO} 5. B 历史推送 {len(b_rows)} 次：{times}")
         else:
-            print(f"{OK} 5. 此 refund_id 从未被 B 推过")
+            print(f"{INFO} 5. 此 refund_id 从未被 B 推过")
 
         # 6. 今日 B 配额 + 排序位置
         used = _b_quota_used_today(now)
@@ -139,6 +138,8 @@ def diagnose(refund_id: str) -> str:
         # 估算此单在今日 B 候选里的 deadline 排名
         # （所有最新 snapshot 中：待商家收货 + 有 tracking + 在 logistics_cache 已签收 ≥2 天 + 未推过 B）
         today_start = datetime.combine(now.date(), dtime(0, 0), tzinfo=TIMEZONE)
+        # B 候选池：状态=待商家收货 + 有 tracking + 物流缓存里签收 ≥ 2 天
+        # （B 已无引擎层去重，候选池不再排除已推过的）
         candidates = conn.execute("""
             SELECT s.refund_id, s.deadline_at
             FROM order_snapshots s
@@ -148,13 +149,10 @@ def diagnose(refund_id: str) -> str:
                 GROUP BY refund_id
             ) m ON s.refund_id = m.refund_id AND s.snapshot_at = m.mx
             JOIN logistics_cache l ON l.tracking_no = s.return_tracking_no
-            LEFT JOIN pushed_records p
-                ON p.refund_id = s.refund_id AND p.scenario = 'B'
             WHERE s.status = ?
               AND s.return_tracking_no IS NOT NULL
               AND l.signed_at IS NOT NULL
               AND l.signed_at <= ?
-              AND p.refund_id IS NULL
         """, (
             STATUS_PENDING_MERCHANT_RECEIVE,
             (now - timedelta(days=SIGNED_THRESHOLD_DAYS)).isoformat(),

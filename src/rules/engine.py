@@ -103,8 +103,10 @@ def evaluate(
             if (
                 logistics.signed_at is not None
                 and (now - logistics.signed_at) >= timedelta(days=SIGNED_THRESHOLD_DAYS)
-                and (r.refund_id, "B") not in already_pushed
             ):
+                # B 不做引擎层去重：签收 ≥2 天且未确认的单子每轮都进候选，
+                # 重复轰炸由 runner 的「每日配额 B_DAILY_QUOTA」兜底。
+                # already_pushed 参数当前未被消费，但保留接口以便未来扩展场景去重。
                 scenarios.append("B")
 
         if scenarios:

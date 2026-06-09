@@ -108,7 +108,7 @@ class TestMerge:
 
 
 class TestDedup:
-    """A/A2 不再 dedup（每轮都推，保证紧迫单子在眼前）；B 仍 dedup。"""
+    """A/A2/B 均不在引擎层 dedup；B 的重复轰炸由 runner 的每日配额兜底。"""
 
     def test_a_repushes_even_if_already_pushed(self):
         """A 推过仍会再推 —— 紧迫单子持续提醒直到处理。"""
@@ -128,13 +128,13 @@ class TestDedup:
         out = evaluate([r], {}, {("RF1", "A2")}, NOW)
         assert out and out[0].scenarios == ["A2"]
 
-    def test_b_still_dedups(self):
-        """B 仍然 dedup —— 不然每天 quota 10 条会被同一批占满。"""
+    def test_b_repushes_even_if_already_pushed(self):
+        """B 推过仍会再进候选 —— 每日配额是唯一的重复轰炸闸门。"""
         r = mk("RF1", status="待商家收货", return_tracking_no="YT123",
                deadline_at=NOW + timedelta(hours=120))  # 远离 deadline
         logistics = {"YT123": LogisticsInfo("YT123", signed_at=NOW - timedelta(days=5))}
         out = evaluate([r], logistics, {("RF1", "B")}, NOW)
-        assert out == []
+        assert out and out[0].scenarios == ["B"]
 
     def test_a2_plus_b_when_a2_pushed_b_not(self):
         """A2 重推 + B 首次推 → 合并决策含两个场景。"""
