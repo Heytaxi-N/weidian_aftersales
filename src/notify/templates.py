@@ -227,7 +227,6 @@ D_TEMPLATE = env.from_string("""\
 > 规格：{{ p.item_sku_title or '—' }}
 > 收件人：{{ p.customer_name or '—' }} / {{ p.customer_phone or '—' }}
 > 退货单号：`{{ p.return_tracking_no }}`（复制此单号去买家版填写）
-> 退款编号：`{{ p.refund_no }}`
 """)
 
 

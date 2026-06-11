@@ -41,4 +41,4 @@ def test_render_d_includes_tracking():
     assert "复制此单号去买家版填写" in out
     assert "李客户" in out and "13400134000" in out
     assert "供货商店" in out
-    assert "R1" in out
+    assert "退款编号" not in out   # 已去掉
