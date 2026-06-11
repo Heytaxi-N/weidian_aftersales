@@ -184,8 +184,8 @@ class BuyerPushPayload:
     item_title_first10: str       # 商品名前 10 字
     item_sku_title: str           # 规格，如"藏青色;2XL"
     hours_left: float             # 剩余处理小时数
-    receiver_name: str | None = None
-    receiver_phone: str | None = None
+    customer_name: str | None = None     # 真实客户（代发收件人）
+    customer_phone: str | None = None
     operate_status_str: str | None = None    # 如"商家同意退货，请退回商品"
 
 
@@ -194,7 +194,7 @@ C_TEMPLATE = env.from_string("""\
 > 店铺：{{ p.shop_name or '—' }}
 > 商品：{{ p.item_title_first10 or '—' }}
 > 规格：{{ p.item_sku_title or '—' }}
-> 收件人：{{ p.receiver_name or '—' }} / {{ p.receiver_phone or '—' }}
+> 收件人：{{ p.customer_name or '—' }} / {{ p.customer_phone or '—' }}
 > 退款编号：`{{ p.refund_no }}`
 {% if p.operate_status_str %}
 > 当前操作：{{ p.operate_status_str }}
@@ -204,3 +204,32 @@ C_TEMPLATE = env.from_string("""\
 
 def render_c(p: BuyerPushPayload) -> str:
     return C_TEMPLATE.render(p=p).strip()
+
+
+# === 场景 D：卖家版退货单号 ↔ 买家版售后 关联 ===
+
+@dataclass
+class DPushPayload:
+    """场景 D 的推送内容：提醒店主把退货单号填进买家版。"""
+    refund_no: str                # 买家版退款编号
+    shop_name: str                # 供货商店名
+    item_title_first10: str
+    item_sku_title: str
+    customer_name: str | None     # 真实客户（代发收件人）
+    customer_phone: str | None
+    return_tracking_no: str       # 卖家版客户填的退货单号 —— 复制去买家版填
+
+
+D_TEMPLATE = env.from_string("""\
+📦 **买家版待填退货单号**
+> 供货商：{{ p.shop_name or '—' }}
+> 商品：{{ p.item_title_first10 or '—' }}
+> 规格：{{ p.item_sku_title or '—' }}
+> 收件人：{{ p.customer_name or '—' }} / {{ p.customer_phone or '—' }}
+> 退货单号：`{{ p.return_tracking_no }}`（复制此单号去买家版填写）
+> 退款编号：`{{ p.refund_no }}`
+""")
+
+
+def render_d(p: DPushPayload) -> str:
+    return D_TEMPLATE.render(p=p).strip()

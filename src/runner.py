@@ -22,10 +22,12 @@ from src.logistics import weidian_trace as logistics_provider
 from src.notify import render as card_render, wecom
 from src.notify.templates import (
     BuyerPushPayload,
+    DPushPayload,
     OverviewStats,
     render_b,
     render_b_group_header,
     render_c,
+    render_d,
     render_overview,
     render_urgent,
 )
@@ -37,6 +39,7 @@ from src.rules.engine import (
     TIER_WARN_HOURS,
     evaluate,
     evaluate_buyer,
+    match_d,
     to_payload,
 )
 from src.weidian import buyer_client
@@ -323,34 +326,41 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
     return n
 
 
-def _push_buyer_c(dry_run: bool) -> int:
-    """场景 C：买家版「待买家处理退货」剩余 ≤ 25h 的逐笔推送。
+def _fetch_buyer_refunds():
+    """抓买家版退款列表 + 补详情（倒计时、客户信息）。C 和 D 共用一次抓取。
 
-    走独立 webhook（WECOM_WEBHOOK_URL_BUYER）。
-    失败仅 log + 告警，不阻断卖家版主流程。
+    成功返回 list[BuyerRefundRecord]；失败 send_alert + 返回 None（不阻断卖家版主流程）。
     """
     try:
         refunds = buyer_client.fetch_refund_list()
     except buyer_client.WeidianNotLoggedIn as e:
         log.warning("buyer-side login expired: %s", e)
-        wecom.send_alert(f"买家版登录失效，C 场景无法工作：{e}")
-        return 0
+        wecom.send_alert(f"买家版登录失效，C/D 场景无法工作：{e}")
+        return None
     except Exception as e:
         log.exception("buyer refund list fetch failed: %s", e)
         wecom.send_alert(f"买家版退款列表抓取失败：{e}")
-        return 0
+        return None
 
     try:
         buyer_client.enrich_refunds(refunds)
     except buyer_client.WeidianNotLoggedIn as e:
         log.warning("buyer-side login expired during enrich: %s", e)
         wecom.send_alert(f"买家版登录失效（enrich 阶段）：{e}")
-        return 0
+        return None
     except Exception as e:
         log.exception("buyer refund enrich failed: %s", e)
-        # 不中断 — evaluate 会跳过 countdown_seconds 为 None 的笔
-    decisions = evaluate_buyer(refunds)
-    log.info("C candidates: %d (buyer refunds total: %d)", len(decisions), len(refunds))
+        # 不中断 — evaluate/match 会跳过缺字段的笔
+    return refunds
+
+
+def _push_buyer_c(buyer_refunds, dry_run: bool) -> int:
+    """场景 C：买家版「待买家处理退货」剩余 ≤ 25h 的逐笔推送。
+
+    走独立 webhook（WECOM_WEBHOOK_URL_BUYER）。
+    """
+    decisions = evaluate_buyer(buyer_refunds)
+    log.info("C candidates: %d (buyer refunds total: %d)", len(decisions), len(buyer_refunds))
 
     n = 0
     for d in decisions:
@@ -361,8 +371,8 @@ def _push_buyer_c(dry_run: bool) -> int:
             item_title_first10=(r.item_title or "")[:10],
             item_sku_title=r.item_sku_title,
             hours_left=d.hours_left or 0.0,
-            receiver_name=r.receiver_name,
-            receiver_phone=r.receiver_phone,
+            customer_name=r.customer_name,
+            customer_phone=r.customer_phone,
             operate_status_str=r.operate_status_str,
         )
         msg = render_c(payload)
@@ -375,6 +385,39 @@ def _push_buyer_c(dry_run: bool) -> int:
             n += 1
         except Exception as e:
             log.exception("C push failed %s: %s", r.refund_no, e)
+    return n
+
+
+def _push_d(buyer_refunds, seller_refunds, dry_run: bool) -> int:
+    """场景 D：买家版「待买家处理退货」匹配卖家版退货单号 → 提醒店主去买家版填单号。
+
+    走独立 webhook（WECOM_WEBHOOK_URL_BUYER）。每轮都推，不去重不限额。
+    """
+    decisions = match_d(buyer_refunds, seller_refunds)
+    log.info("D candidates: %d", len(decisions))
+
+    n = 0
+    for d in decisions:
+        r = d.buyer_refund
+        payload = DPushPayload(
+            refund_no=r.refund_no,
+            shop_name=r.shop_name,
+            item_title_first10=(r.item_title or "")[:10],
+            item_sku_title=r.item_sku_title,
+            customer_name=r.customer_name,
+            customer_phone=r.customer_phone,
+            return_tracking_no=d.return_tracking_no,
+        )
+        msg = render_d(payload)
+        if dry_run:
+            log.info("[dry-run] D %s shop=%s tracking=%s",
+                     r.refund_no, r.shop_name, d.return_tracking_no)
+            continue
+        try:
+            wecom.send_markdown(msg, webhook_url=WECOM_WEBHOOK_URL_BUYER)
+            n += 1
+        except Exception as e:
+            log.exception("D push failed %s: %s", r.refund_no, e)
     return n
 
 
@@ -426,11 +469,16 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
     pushed_b = _push_b(decisions, started, dry_run)
     log.info("B pushed: %d", pushed_b)
 
-    # 8. 推 C 买家版临期（走独立 webhook，失败不影响卖家版）
-    pushed_c = _push_buyer_c(dry_run)
-    log.info("C pushed: %d", pushed_c)
+    # 8. 买家版：抓一次（C/D 共用），再分别推 C（临期）和 D（待填单号）
+    buyer_refunds = _fetch_buyer_refunds()
+    pushed_c = pushed_d = 0
+    if buyer_refunds is not None:
+        pushed_c = _push_buyer_c(buyer_refunds, dry_run)
+        log.info("C pushed: %d", pushed_c)
+        pushed_d = _push_d(buyer_refunds, pending, dry_run)
+        log.info("D pushed: %d", pushed_d)
 
-    pushed_count = pushed_urgent + pushed_b + pushed_c
+    pushed_count = pushed_urgent + pushed_b + pushed_c + pushed_d
 
     # 9. 早报（仅 09:00 那轮）
     if daily_report and not dry_run:
@@ -446,10 +494,11 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
             "INSERT INTO run_log(started_at, finished_at, ok, note) VALUES (?,?,?,?)",
             (snapshot_at, datetime.now(TIMEZONE).isoformat(), 1,
              f"refunds={len(refunds)} pending={len(pending)} "
-             f"urgent={pushed_urgent} b={pushed_b} c={pushed_c}"),
+             f"urgent={pushed_urgent} b={pushed_b} c={pushed_c} d={pushed_d}"),
         )
 
-    log.info("=== run done urgent=%d B=%d C=%d ===", pushed_urgent, pushed_b, pushed_c)
+    log.info("=== run done urgent=%d B=%d C=%d D=%d ===",
+             pushed_urgent, pushed_b, pushed_c, pushed_d)
     return 0
 
 
