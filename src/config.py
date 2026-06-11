@@ -17,6 +17,11 @@ load_dotenv(ROOT / ".env")
 
 WECOM_WEBHOOK_URL = os.getenv("WECOM_WEBHOOK_URL", "")
 WECOM_WEBHOOK_URL_BUYER = os.getenv("WECOM_WEBHOOK_URL_BUYER", "")
+
+# D 自动填退货单号：默认关闭，需显式开启（对真实退款的写操作）
+D_AUTOFILL_ENABLED = os.getenv("D_AUTOFILL_ENABLED", "").lower() in ("1", "true", "yes")
+# 灰度：>0 时本轮最多自动填 N 笔（首次验证用），0 = 不限
+D_AUTOFILL_LIMIT = int(os.getenv("D_AUTOFILL_LIMIT", "0"))
 WEIDIAN_USERNAME = os.getenv("WEIDIAN_USERNAME", "")
 WEIDIAN_PASSWORD = os.getenv("WEIDIAN_PASSWORD", "")
 WEIDIAN_SHOP_ID = os.getenv("WEIDIAN_SHOP_ID", "")

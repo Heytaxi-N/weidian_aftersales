@@ -1,7 +1,7 @@
 """验证场景 D：买家版「待买家处理退货」↔ 卖家版「待商家收货」按客户手机号关联。"""
 from __future__ import annotations
 
-from src.rules.engine import _normalize_phone, match_d
+from src.rules.engine import _normalize_phone, classify_d, match_d
 from src.weidian.buyer_client import BuyerRefundRecord
 from src.weidian.client import RefundRecord
 
@@ -16,12 +16,14 @@ def _buyer(refund_no="B1", status="待买家处理退货", customer_phone="13800
 
 
 def _seller(refund_id="S1", status="待商家收货", tracking="SF123",
-            buyer_phone="13800138000", receiver_phone=None) -> RefundRecord:
+            buyer_phone="13800138000", receiver_phone=None,
+            express_type=10, item_title="卖家商品") -> RefundRecord:
     return RefundRecord(
         refund_id=refund_id, order_id="O" + refund_id, refund_type="退货退款",
         status=status, deadline_at=None,
         buyer_phone=buyer_phone, receiver_phone=receiver_phone,
-        return_tracking_no=tracking,
+        return_tracking_no=tracking, return_express_type=express_type,
+        item_title=item_title,
     )
 
 
@@ -113,3 +115,73 @@ def test_multiple_mixed():
     out = match_d(buyers, sellers)
     got = {(d.buyer_refund.refund_no, d.return_tracking_no) for d in out}
     assert got == {("B_hit", "T1"), ("B_hit2", "T3")}
+
+
+# === classify_d：唯一 → 自动；多笔 → 转人工 ===
+
+def test_classify_unique_goes_autofill():
+    autofills, ambiguous = classify_d([_buyer()], [_seller(tracking="SF1", express_type=10)])
+    assert len(autofills) == 1 and not ambiguous
+    af = autofills[0]
+    assert af.return_tracking_no == "SF1"
+    assert af.return_express_type == 10
+
+
+def test_classify_same_tracking_multiple_records_is_unique():
+    """同一单号在卖家侧出现多条（buyer/receiver 双命中等）算一个 → 仍自动。"""
+    sellers = [
+        _seller(refund_id="S1", tracking="SF1", buyer_phone="13800138000",
+                receiver_phone="13800138000"),  # 双命中同一单号
+    ]
+    autofills, ambiguous = classify_d([_buyer()], sellers)
+    assert len(autofills) == 1 and not ambiguous
+
+
+def test_classify_multiple_trackings_goes_ambiguous():
+    """同手机号多个不同单号 → 转人工，候选齐全。"""
+    sellers = [
+        _seller(refund_id="S1", tracking="SF1", item_title="运动裤"),
+        _seller(refund_id="S2", tracking="SF2", item_title="短袖"),
+        _seller(refund_id="S3", tracking="SF3", item_title="皮肤衣"),
+    ]
+    autofills, ambiguous = classify_d([_buyer()], sellers)
+    assert not autofills and len(ambiguous) == 1
+    cands = ambiguous[0].candidates
+    assert {c.tracking_no for c in cands} == {"SF1", "SF2", "SF3"}
+    assert {c.seller_item_title for c in cands} == {"运动裤", "短袖", "皮肤衣"}
+
+
+def test_classify_no_match_yields_nothing():
+    autofills, ambiguous = classify_d(
+        [_buyer(customer_phone="13800138000")],
+        [_seller(buyer_phone="13911111111")],
+    )
+    assert not autofills and not ambiguous
+
+
+def test_classify_skips_buyer_wrong_status():
+    autofills, ambiguous = classify_d([_buyer(status="待商家处理退货")], [_seller()])
+    assert not autofills and not ambiguous
+
+
+def test_classify_unique_missing_express_type_still_autofill():
+    """缺 express_type 不在 classify 层降级（由 runner 决定）；这里仍归 autofill 但 type=None。"""
+    autofills, ambiguous = classify_d([_buyer()], [_seller(express_type=None)])
+    assert len(autofills) == 1
+    assert autofills[0].return_express_type is None
+
+
+def test_classify_mixed_population():
+    buyers = [
+        _buyer(refund_no="B_uniq", customer_phone="13800000001"),
+        _buyer(refund_no="B_ambi", customer_phone="13800000002"),
+        _buyer(refund_no="B_none", customer_phone="13800000009"),
+    ]
+    sellers = [
+        _seller(refund_id="Sa", tracking="T1", buyer_phone="13800000001"),
+        _seller(refund_id="Sb1", tracking="T2", buyer_phone="13800000002"),
+        _seller(refund_id="Sb2", tracking="T3", buyer_phone="13800000002"),
+    ]
+    autofills, ambiguous = classify_d(buyers, sellers)
+    assert {a.buyer_refund.refund_no for a in autofills} == {"B_uniq"}
+    assert {a.buyer_refund.refund_no for a in ambiguous} == {"B_ambi"}

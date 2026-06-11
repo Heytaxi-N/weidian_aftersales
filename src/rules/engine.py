@@ -226,3 +226,87 @@ def match_d(buyer_refunds: Iterable, seller_refunds: Iterable) -> list[DDecision
                 seller_refund_id=s.refund_id,
             ))
     return out
+
+
+# === 自动填单号：唯一→自动，多笔→转人工 ===
+
+@dataclass
+class DAutoFill:
+    """唯一匹配，可自动填：一个客户手机号在卖家版只有 1 个退货单号。"""
+    buyer_refund: "BuyerRefundRecord"
+    return_tracking_no: str
+    return_express_type: int | None     # 卖家版承运商 ID，提交买家版填单号要用
+    seller_refund_id: str
+
+
+@dataclass
+class DAmbiguousCandidate:
+    tracking_no: str
+    express_type: int | None
+    seller_item_title: str | None
+
+
+@dataclass
+class DAmbiguous:
+    """多笔候选，转人工：同手机号有多个不同退货单号，无法安全自动消歧。"""
+    buyer_refund: "BuyerRefundRecord"
+    candidates: list[DAmbiguousCandidate]
+
+
+def classify_d(
+    buyer_refunds: Iterable, seller_refunds: Iterable
+) -> tuple[list[DAutoFill], list[DAmbiguous]]:
+    """对每笔买家版「待买家处理退货」按客户手机号关联卖家版「待商家收货」（有单号），
+    按"卖家侧去重后的单号数"分类：
+
+      - 恰好 1 个单号  → DAutoFill（可自动填）
+      - ≥2 个不同单号  → DAmbiguous（转人工）
+
+    同一单号在卖家侧出现多条（buyer_phone/receiver_phone 双命中等）算一个。
+    缺 return_express_type 不在此处降级 —— 由 runner 决定是否因此转人工。
+    """
+    # phone -> {tracking_no: RefundRecord}（按单号去重）
+    seller_idx: dict[str, dict[str, "RefundRecord"]] = {}
+    for s in seller_refunds:
+        if getattr(s, "status", None) != STATUS_PENDING_MERCHANT_RECEIVE:
+            continue
+        tn = getattr(s, "return_tracking_no", None)
+        if not tn:
+            continue
+        for ph in (getattr(s, "buyer_phone", None), getattr(s, "receiver_phone", None)):
+            n = _normalize_phone(ph)
+            if n:
+                seller_idx.setdefault(n, {}).setdefault(tn, s)
+
+    autofills: list[DAutoFill] = []
+    ambiguous: list[DAmbiguous] = []
+    for b in buyer_refunds:
+        if getattr(b, "refund_status_str", None) != "待买家处理退货":
+            continue
+        n = _normalize_phone(getattr(b, "customer_phone", None))
+        if not n:
+            continue
+        by_tracking = seller_idx.get(n)
+        if not by_tracking:
+            continue
+        if len(by_tracking) == 1:
+            s = next(iter(by_tracking.values()))
+            autofills.append(DAutoFill(
+                buyer_refund=b,
+                return_tracking_no=s.return_tracking_no,
+                return_express_type=getattr(s, "return_express_type", None),
+                seller_refund_id=s.refund_id,
+            ))
+        else:
+            ambiguous.append(DAmbiguous(
+                buyer_refund=b,
+                candidates=[
+                    DAmbiguousCandidate(
+                        tracking_no=s.return_tracking_no,
+                        express_type=getattr(s, "return_express_type", None),
+                        seller_item_title=getattr(s, "item_title", None),
+                    )
+                    for s in by_tracking.values()
+                ],
+            ))
+    return autofills, ambiguous
