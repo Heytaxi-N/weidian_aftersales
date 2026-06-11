@@ -8,6 +8,7 @@ import pytest
 
 from src.weidian.buyer_client import (
     BuyerRefundRecord,
+    _items_to_records,
     enrich_refunds,
     parse_refund_list_html,
     WeidianApiError,
@@ -106,6 +107,15 @@ def test_parse_refund_list_detects_login_redirect():
     login_html = "<html><body><h1>请登录后再访问</h1></body></html>"
     with pytest.raises(WeidianNotLoggedIn):
         parse_refund_list_html(login_html)
+
+
+def test_items_to_records_directly():
+    """frontRefundList API 返回的是 raw list（无 SSR 的 list/status 包装）。
+    复用 _items_to_records 也能正常映射。"""
+    raw = [_sample_refund(refund_no=f"R{i}") for i in range(3)]
+    records = _items_to_records(raw)
+    assert [r.refund_no for r in records] == ["R0", "R1", "R2"]
+    assert all(r.shop_name == "测试店" for r in records)
 
 
 def test_parse_refund_list_handles_missing_optional_fields():

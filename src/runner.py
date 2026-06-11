@@ -330,7 +330,7 @@ def _push_buyer_c(dry_run: bool) -> int:
     失败仅 log + 告警，不阻断卖家版主流程。
     """
     try:
-        refunds = buyer_client.fetch_refund_list_html(type_=5)
+        refunds = buyer_client.fetch_refund_list()
     except buyer_client.WeidianNotLoggedIn as e:
         log.warning("buyer-side login expired: %s", e)
         wecom.send_alert(f"买家版登录失效，C 场景无法工作：{e}")

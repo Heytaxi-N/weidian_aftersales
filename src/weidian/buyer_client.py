@@ -37,7 +37,8 @@ from src.weidian.client import _load_cookies_and_token, WeidianNotLoggedIn, Weid
 
 log = logging.getLogger(__name__)
 
-BUYER_REFUND_LIST_URL = "https://weidian.com/user/order/refundList"
+BUYER_REFUND_LIST_API = "https://thor.weidian.com/refundplatform/buyer.frontRefundList/1.0"
+BUYER_REFUND_LIST_URL = "https://weidian.com/user/order/refundList"   # SSR 后备方案（受 sid 绑定单店铺）
 BUYER_REFUND_DETAIL_URL = "https://thor.weidian.com/refundplatform/getRefundDetail/1.0"
 BUYER_REFUND_DETAIL_PAGE_FMT = (
     "https://weidian.com/weidian-h5/aftersale/refund-detail.html"
@@ -94,40 +95,17 @@ def _parse_dt(s: str | None) -> datetime | None:
         return None
 
 
-def parse_refund_list_html(html_text: str) -> list[BuyerRefundRecord]:
-    """从买家版退款列表 SSR HTML 抽出 BuyerRefundRecord 列表。
+def _items_to_records(items: list[dict]) -> list[BuyerRefundRecord]:
+    """把买家版列表返回的 raw items 映射成 BuyerRefundRecord。
 
-    抛 WeidianNotLoggedIn 如果检测到登录态丢失（页面跳转到登录页 / 没有 data-obj）。
+    SSR HTML 和 buyer.frontRefundList API 的元素结构完全一致，复用。
     """
-    m = _INJECT_SCRIPT_RE.search(html_text)
-    if not m:
-        # 登录态丢失时页面会重定向到登录或返回不同结构
-        if "login" in html_text.lower()[:5000] or "登录" in html_text[:5000]:
-            raise WeidianNotLoggedIn("买家版退款列表页要求登录 — 请重新登录")
-        raise WeidianApiError("未在退款列表 HTML 中找到 __rocker-render-inject__ 脚本（页面结构可能变更）")
-
-    raw_attr = m.group(1)
-    decoded = html.unescape(raw_attr)
-    try:
-        data = json.loads(decoded)
-    except json.JSONDecodeError as e:
-        raise WeidianApiError(f"data-obj JSON 解析失败：{e}")
-
-    list_block = data.get("list") or {}
-    status = list_block.get("status") or {}
-    if status.get("code") not in (0, None):
-        # 服务端给了错误码
-        raise WeidianApiError(
-            f"refund list status code={status.get('code')} msg={status.get('message')}"
-        )
-    result = list_block.get("result") or []
-
     out: list[BuyerRefundRecord] = []
-    for item in result:
+    for item in items:
         refund_info = item.get("refund_info") or {}
         shop_info = item.get("shopInfo") or {}
-        items_list = item.get("items") or []
-        first_item = items_list[0] if items_list else {}
+        sub_items = item.get("items") or []
+        first_item = sub_items[0] if sub_items else {}
 
         out.append(BuyerRefundRecord(
             refund_no=str(refund_info.get("refund_no") or ""),
@@ -144,8 +122,71 @@ def parse_refund_list_html(html_text: str) -> list[BuyerRefundRecord]:
     return out
 
 
+def parse_refund_list_html(html_text: str) -> list[BuyerRefundRecord]:
+    """从买家版退款列表 SSR HTML 抽出 BuyerRefundRecord 列表（后备方案）。
+
+    ⚠️ SSR 页受 cookie 中 `sid` 绑定的店铺过滤，只返回单店铺的退款，
+    多供货商场景下会漏单。生产路径应使用 fetch_refund_list()。
+    保留此函数是因为 SSR HTML 结构稳定、不依赖 API 变更，作为 fallback。
+
+    抛 WeidianNotLoggedIn 如果检测到登录态丢失。
+    """
+    m = _INJECT_SCRIPT_RE.search(html_text)
+    if not m:
+        if "login" in html_text.lower()[:5000] or "登录" in html_text[:5000]:
+            raise WeidianNotLoggedIn("买家版退款列表页要求登录 — 请重新登录")
+        raise WeidianApiError("未在退款列表 HTML 中找到 __rocker-render-inject__ 脚本（页面结构可能变更）")
+
+    raw_attr = m.group(1)
+    decoded = html.unescape(raw_attr)
+    try:
+        data = json.loads(decoded)
+    except json.JSONDecodeError as e:
+        raise WeidianApiError(f"data-obj JSON 解析失败：{e}")
+
+    list_block = data.get("list") or {}
+    status = list_block.get("status") or {}
+    if status.get("code") not in (0, None):
+        raise WeidianApiError(
+            f"refund list status code={status.get('code')} msg={status.get('message')}"
+        )
+    return _items_to_records(list_block.get("result") or [])
+
+
+def fetch_refund_list() -> list[BuyerRefundRecord]:
+    """直调 buyer.frontRefundList API 抓买家版**全部店铺**的退款列表。
+
+    不受 sid cookie 绑定的店铺过滤，返回该买家账号下所有供货商的退款。
+    （SSR 页 weidian.com/user/order/refundList 只能返回单店铺，已废弃。）
+    """
+    cookies, _ = _load_cookies_and_token()
+    with httpx.Client(cookies=cookies, headers=HEADERS) as client:
+        params = {
+            "param": json.dumps({"from": "h5"}, separators=(",", ":"), ensure_ascii=False),
+            "_": str(int(time.time() * 1000)),
+        }
+        r = client.get(BUYER_REFUND_LIST_API, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        status = data.get("status") or {}
+        if status.get("code") != 0:
+            msg = status.get("message", "")
+            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+                raise WeidianNotLoggedIn(f"frontRefundList 要求登录：{msg}")
+            raise WeidianApiError(
+                f"buyer.frontRefundList code={status.get('code')} message={msg}"
+            )
+        records = _items_to_records(data.get("result") or [])
+    log.info("buyer refund list (frontRefundList): %d records", len(records))
+    return records
+
+
 def fetch_refund_list_html(type_: int = 5) -> list[BuyerRefundRecord]:
-    """抓买家版退款列表（SSR 页）。"""
+    """[已废弃] 抓 SSR 页解析退款列表。
+
+    ⚠️ SSR 页受 cookie sid 绑定的店铺过滤，**多供货商场景下会漏单**。
+    保留仅作为 fetch_refund_list() 失败时的 fallback。生产代码请用 fetch_refund_list()。
+    """
     cookies, _ = _load_cookies_and_token()
     with httpx.Client(cookies=cookies, headers=HEADERS) as client:
         r = client.get(
@@ -155,7 +196,7 @@ def fetch_refund_list_html(type_: int = 5) -> list[BuyerRefundRecord]:
         )
         r.raise_for_status()
         records = parse_refund_list_html(r.text)
-    log.info("buyer refund list (type=%d): %d records", type_, len(records))
+    log.warning("buyer refund list (SSR fallback, may miss multi-shop): %d records", len(records))
     return records
 
 
