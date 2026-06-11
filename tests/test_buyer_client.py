@@ -243,3 +243,70 @@ def test_enrich_refunds_swallows_per_item_errors(monkeypatch):
     assert refunds[0].countdown_seconds == 1000
     assert refunds[1].countdown_seconds is None   # 失败保持 None
     assert refunds[2].countdown_seconds == 2000
+
+
+# === submit_return_express（写操作，全程 mock，绝不打真实接口）===
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._p = payload
+        self.captured = None
+    def raise_for_status(self): pass
+    def json(self): return self._p
+
+
+def test_submit_return_express_posts_expected_payload(monkeypatch):
+    from src.weidian import buyer_client
+    sent = {}
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def close(self): pass
+        def post(self, url, data=None, timeout=None):
+            sent["url"] = url
+            sent["data"] = data
+            return _FakeResp({"status": {"code": 0}, "result": {"ok": 1}})
+
+    monkeypatch.setattr(buyer_client, "_load_cookies_and_token", lambda: ({}, ""))
+    monkeypatch.setattr(buyer_client.httpx, "Client", lambda **kw: _Client())
+
+    buyer_client.submit_return_express(
+        refund_no="RF1", express_no="SF123", express_type=3, express_company="中通速递",
+    )
+    assert "buyer.submitExpressInfo" in sent["url"]
+    import json as _json
+    payload = _json.loads(sent["data"]["param"])
+    assert payload["refundNo"] == "RF1"
+    assert payload["expressNo"] == "SF123"
+    assert payload["expressType"] == 3
+    assert payload["expressCompany"] == "中通速递"
+    assert payload["operateType"] == 1
+
+
+def test_submit_return_express_raises_on_api_error(monkeypatch):
+    from src.weidian import buyer_client
+
+    class _Client:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def close(self): pass
+        def post(self, url, data=None, timeout=None):
+            return _FakeResp({"status": {"code": 500, "message": "boom"}})
+
+    monkeypatch.setattr(buyer_client, "_load_cookies_and_token", lambda: ({}, ""))
+    monkeypatch.setattr(buyer_client.httpx, "Client", lambda **kw: _Client())
+
+    import pytest as _pytest
+    with _pytest.raises(buyer_client.WeidianApiError):
+        buyer_client.submit_return_express(
+            refund_no="RF1", express_no="SF1", express_type=3, express_company="中通速递")
+
+
+def test_submit_return_express_rejects_incomplete_args(monkeypatch):
+    from src.weidian import buyer_client
+    import pytest as _pytest
+    # 缺承运商名 → 不发请求，直接抛
+    with _pytest.raises(buyer_client.WeidianApiError):
+        buyer_client.submit_return_express(
+            refund_no="RF1", express_no="SF1", express_type=3, express_company="")

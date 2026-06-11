@@ -309,3 +309,88 @@ def enrich_refunds(refunds: Iterable[BuyerRefundRecord]) -> None:
             except Exception as e:
                 log.warning("buyer order detail failed for %s: %s", r.order_id, e)
     log.info("buyer refunds enriched: %d", len(targets))
+
+
+# === 自动填退货单号（写操作，唯一开放的微店写动作）===
+#
+# 抓包（从 weidian-h5/aftersale/logistics 页面 JS 逆向）：
+#   反查物流公司枚举: GET  vexpress/seller.getSuggestExpressList/1.1
+#                     param={"express_no": <单号>, "user_type": 1}
+#                     → result.common_express = [{id, express_company}, ...]（id=承运商枚举）
+#   提交单号:         POST refundplatform/buyer.submitExpressInfo/1.0
+#                     body 表单 param=<JSON>，JSON =
+#                       {refundNo, expressType:<id>, expressCompany:<名称>,
+#                        expressNo:<单号>, operateType:1}（1=新填,2=编辑）
+# ⚠️ POST 编码（表单 param= vs JSON body）与 expressType 枚举是否 == 卖家版
+#    return_express_type，均需灰度首测（D_AUTOFILL_LIMIT=1）实测确认。
+
+BUYER_SUGGEST_EXPRESS_API = "https://thor.weidian.com/vexpress/seller.getSuggestExpressList/1.1"
+BUYER_SUBMIT_EXPRESS_API = "https://thor.weidian.com/refundplatform/buyer.submitExpressInfo/1.0"
+
+
+def _express_id_to_company() -> dict[int, str]:
+    """拉买家版承运商枚举，返回 {expressType id: 物流公司名}。"""
+    cookies, _ = _load_cookies_and_token()
+    with httpx.Client(cookies=cookies, headers=HEADERS) as client:
+        param = json.dumps({"express_no": "", "user_type": 1},
+                           separators=(",", ":"), ensure_ascii=False)
+        r = client.get(BUYER_SUGGEST_EXPRESS_API,
+                       params={"param": param, "_": str(int(time.time() * 1000))},
+                       timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if (data.get("status") or {}).get("code") != 0:
+            raise WeidianApiError(f"getSuggestExpressList: {data.get('status')}")
+        out: dict[int, str] = {}
+        for e in (data.get("result") or {}).get("common_express") or []:
+            if e.get("id") is not None and e.get("express_company"):
+                out[int(e["id"])] = e["express_company"]
+        return out
+
+
+def submit_return_express(
+    refund_no: str,
+    express_no: str,
+    express_type: int,
+    express_company: str,
+    *,
+    client: httpx.Client | None = None,
+) -> None:
+    """把退货单号填进买家版售后（写操作）。
+
+    调用方需先用 classify_d 确认唯一匹配，并解析好 express_type/express_company
+    （见 resolve_express_company）。失败抛 WeidianApiError / WeidianNotLoggedIn。
+    """
+    if not (refund_no and express_no and express_type and express_company):
+        raise WeidianApiError(
+            f"submit_return_express 参数不全: refund_no={refund_no} "
+            f"express_no={express_no} express_type={express_type} company={express_company}"
+        )
+    own_client = client is None
+    if own_client:
+        cookies, _ = _load_cookies_and_token()
+        client = httpx.Client(cookies=cookies, headers=HEADERS)
+    try:
+        payload = {
+            "refundNo": refund_no,
+            "expressType": express_type,
+            "expressCompany": express_company,
+            "expressNo": express_no,
+            "operateType": 1,   # 1=新填
+        }
+        param = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        # 微店 thor 网关惯例：POST 表单 param=<JSON 字符串>
+        r = client.post(BUYER_SUBMIT_EXPRESS_API, data={"param": param}, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        status = data.get("status") or {}
+        if status.get("code") != 0:
+            msg = status.get("message", "")
+            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+                raise WeidianNotLoggedIn(f"submitExpressInfo 要求登录：{msg}")
+            raise WeidianApiError(
+                f"submitExpressInfo code={status.get('code')} message={msg}"
+            )
+    finally:
+        if own_client:
+            client.close()

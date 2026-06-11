@@ -16,7 +16,13 @@ from dataclasses import asdict
 from datetime import datetime, time as dtime
 from pathlib import Path
 
-from src.config import LOGS_DIR, TIMEZONE, WECOM_WEBHOOK_URL_BUYER
+from src.config import (
+    LOGS_DIR,
+    TIMEZONE,
+    WECOM_WEBHOOK_URL_BUYER,
+    D_AUTOFILL_ENABLED,
+    D_AUTOFILL_LIMIT,
+)
 from src.db import get_conn
 from src.logistics import weidian_trace as logistics_provider
 from src.notify import render as card_render, wecom
@@ -37,6 +43,7 @@ from src.rules.engine import (
     RefundRecord,
     STATUS_PENDING_MERCHANT_RECEIVE,
     TIER_WARN_HOURS,
+    classify_d,
     evaluate,
     evaluate_buyer,
     match_d,
@@ -421,6 +428,113 @@ def _push_d(buyer_refunds, seller_refunds, dry_run: bool) -> int:
     return n
 
 
+def _load_d_filled() -> set[str]:
+    """已自动填过单号的买家版 refund_no（幂等用）。"""
+    with get_conn() as conn:
+        return {row["refund_id"]
+                for row in conn.execute(
+                    "SELECT refund_id FROM pushed_records WHERE scenario = 'D_FILLED'")}
+
+
+def _autofill_d(buyer_refunds, seller_refunds, dry_run: bool) -> int:
+    """场景 D 自动填单号：唯一匹配 → 自动提交；多笔 → 转人工提醒。
+
+    受 D_AUTOFILL_ENABLED 控制（run 里判断）。走买家版 webhook。
+    幂等：已 D_FILLED 的跳过。dry_run 不提交、不写库。
+    """
+    autofills, ambiguous = classify_d(buyer_refunds, seller_refunds)
+    log.info("D autofill: %d unique, %d ambiguous", len(autofills), len(ambiguous))
+
+    # 多笔 → 转人工
+    for amb in ambiguous:
+        r = amb.buyer_refund
+        lines = [f"⚠️ **买家版待填单号（多个候选，请手动填）**",
+                 f"> 供货商：{r.shop_name or '—'}",
+                 f"> 商品：{(r.item_title or '')[:10]}　规格：{r.item_sku_title or '—'}",
+                 f"> 收件人：{r.customer_name or '—'} / {r.customer_phone or '—'}",
+                 f"> 退款编号：`{r.refund_no}`",
+                 f"> 候选退货单号（同一客户多笔，需你判断）："]
+        for c in amb.candidates:
+            lines.append(f">   · `{c.tracking_no}`（{(c.seller_item_title or '')[:14]}）")
+        msg = "\n".join(lines)
+        if dry_run:
+            log.info("[dry-run] D-ambiguous %s shop=%s candidates=%d",
+                     r.refund_no, r.shop_name, len(amb.candidates))
+        else:
+            try:
+                wecom.send_markdown(msg, webhook_url=WECOM_WEBHOOK_URL_BUYER)
+            except Exception as e:
+                log.exception("D-ambiguous notify failed %s: %s", r.refund_no, e)
+
+    if not autofills:
+        return 0
+
+    # 唯一 → 自动填
+    already = _load_d_filled()
+    express_map: dict[int, str] = {}
+    if not dry_run:
+        try:
+            express_map = buyer_client._express_id_to_company()
+        except Exception as e:
+            log.exception("拉承运商枚举失败，本轮 D 自动填跳过: %s", e)
+            wecom.send_alert(f"D 自动填：承运商枚举拉取失败，已跳过本轮：{e}")
+            return 0
+
+    n = 0
+    for af in autofills:
+        r = af.buyer_refund
+        if r.refund_no in already:
+            continue
+        # 缺承运商信息 → 无法安全自动，降级人工
+        company = express_map.get(af.return_express_type) if af.return_express_type else None
+        if dry_run:
+            log.info("[dry-run] D-autofill %s ← 单号 %s (expressType=%s company=%s)",
+                     r.refund_no, af.return_tracking_no, af.return_express_type, company)
+            continue
+        if not af.return_express_type or not company:
+            log.warning("D-autofill %s 无法解析承运商(expressType=%s)，转人工",
+                        r.refund_no, af.return_express_type)
+            try:
+                wecom.send_markdown(
+                    f"⚠️ **买家版待填单号（承运商待确认，请手动填）**\n"
+                    f"> 供货商：{r.shop_name or '—'}\n"
+                    f"> 退货单号：`{af.return_tracking_no}`\n"
+                    f"> 退款编号：`{r.refund_no}`",
+                    webhook_url=WECOM_WEBHOOK_URL_BUYER)
+            except Exception:
+                pass
+            continue
+        if D_AUTOFILL_LIMIT and n >= D_AUTOFILL_LIMIT:
+            log.info("D-autofill 达到灰度上限 %d，其余本轮不填", D_AUTOFILL_LIMIT)
+            break
+        try:
+            buyer_client.submit_return_express(
+                refund_no=r.refund_no,
+                express_no=af.return_tracking_no,
+                express_type=af.return_express_type,
+                express_company=company,
+            )
+            _record_push(r.refund_no, "D_FILLED",
+                         f"{company} {af.return_tracking_no} → {r.refund_no}", None)
+            n += 1
+            # 审计消息
+            wecom.send_markdown(
+                f"✅ **已自动填入退货单号**\n"
+                f"> 供货商：{r.shop_name or '—'}\n"
+                f"> 商品：{(r.item_title or '')[:10]}　规格：{r.item_sku_title or '—'}\n"
+                f"> 收件人：{r.customer_name or '—'} / {r.customer_phone or '—'}\n"
+                f"> 物流：{company}　单号：`{af.return_tracking_no}`\n"
+                f"> 退款编号：`{r.refund_no}`",
+                webhook_url=WECOM_WEBHOOK_URL_BUYER)
+        except Exception as e:
+            log.exception("D-autofill 提交失败 %s: %s", r.refund_no, e)
+            try:
+                wecom.send_alert(f"D 自动填失败 refund={r.refund_no} 单号={af.return_tracking_no}：{e}")
+            except Exception:
+                pass
+    return n
+
+
 def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bool = False) -> int:
     setup_logging()
     started = datetime.now(TIMEZONE)
@@ -469,14 +583,18 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
     pushed_b = _push_b(decisions, started, dry_run)
     log.info("B pushed: %d", pushed_b)
 
-    # 8. 买家版：抓一次（C/D 共用），再分别推 C（临期）和 D（待填单号）
+    # 8. 买家版：抓一次（C/D 共用），推 C（临期）；D 按开关走自动填或纯提醒
     buyer_refunds = _fetch_buyer_refunds()
     pushed_c = pushed_d = 0
     if buyer_refunds is not None:
         pushed_c = _push_buyer_c(buyer_refunds, dry_run)
         log.info("C pushed: %d", pushed_c)
-        pushed_d = _push_d(buyer_refunds, pending, dry_run)
-        log.info("D pushed: %d", pushed_d)
+        if D_AUTOFILL_ENABLED:
+            pushed_d = _autofill_d(buyer_refunds, pending, dry_run)
+            log.info("D autofilled: %d", pushed_d)
+        else:
+            pushed_d = _push_d(buyer_refunds, pending, dry_run)
+            log.info("D pushed: %d", pushed_d)
 
     pushed_count = pushed_urgent + pushed_b + pushed_c + pushed_d
 

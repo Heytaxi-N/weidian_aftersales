@@ -339,7 +339,7 @@ launchctl unload ~/Library/LaunchAgents/com.shop.aftersale.plist
 
 1. **核心实体是 `refund_id`** —— 一个订单可有多个退款单，独立监控。
 2. **抓包逆向 + httpx 直调**，不靠 Playwright 渲染：卖家版列表/详情/物流/供货商、买家版列表/退款详情/订单详情都用真实 XHR 形态直接 POST/GET。
-3. **DANGER ZONE 隔离**：微店退款详情页有【同意退款】【拒绝退款】危险按钮，物流模块**严禁** Playwright 打开微店域名页面，全靠 cookies + httpx；卡片渲染用 about:blank。
+3. **DANGER ZONE 隔离 + 唯一开放的写动作**：微店退款详情页有【同意退款】【拒绝退款】危险按钮，物流模块**严禁** Playwright 打开微店域名页面，全靠 cookies + httpx；卡片渲染用 about:blank。**唯一开放的写操作是"上传退货物流单号"**（买家版 D 自动填，`buyer.submitExpressInfo`），且仅在客户手机号**唯一匹配**时自动执行、默认关闭（`D_AUTOFILL_ENABLED`）、提交后发企微审计消息；多笔候选一律转人工。同意/拒绝退款、确认收货等仍严禁。
 4. **A/A2/C/D 不去重，每轮都推**：紧迫/待办单子需要持续在眼前直到处理；B 也已移除去重，只受每日配额限制。
 5. **B 每日 20 条上限**：避免一次推太多导致店主无法处理完（早期是 10，后调到 20）。
 6. **买家版用 `buyer.frontRefundList` 而非 SSR 页**：SSR 页 `weidian.com/user/order/refundList` 受 cookie `sid` 绑定只返回单店铺，会漏其他供货商的售后；frontRefundList API 返回全部店铺。
@@ -355,10 +355,11 @@ launchctl unload ~/Library/LaunchAgents/com.shop.aftersale.plist
 - 抓买家版**全部供货商**的售后（frontRefundList，含倒计时、客户信息）
 - 按合作供货商分组推送（卖家版 B）
 - 按客户手机号关联两侧售后，提醒转填退货单号（D）
+- **自动填退货单号（D）**：手机号唯一匹配时自动提交到买家版（默认关，需 `D_AUTOFILL_ENABLED`）；多笔转人工
 - 配额、紧迫度排序、双 webhook 分流
 
 ❌ **不做**：
-- 不主动操作微店（不点确认收货、不同意退款、不自动填单号）
+- 不点确认收货、不同意/拒绝退款（仅"上传退货物流单号"这一个写动作开放，见决策 3）
 - 不监控买家寄货那 7 天
 - 不做多账号（多店铺已通过买家版全店铺覆盖）
 - 不部署到云、不做远程访问
@@ -370,7 +371,7 @@ launchctl unload ~/Library/LaunchAgents/com.shop.aftersale.plist
 .venv/bin/python -m pytest tests/ -v
 ```
 
-当前 71 个单测（+2 skipped）覆盖：
+当前 81 个单测（+2 skipped）覆盖：
 - 卖家版规则引擎判定 + 合并边界（A/A2/B）
 - 买家版 C 触发（倒计时边界）+ D 匹配（手机号归一化 / 状态门控 / 多笔混合）
 - 买家版 SSR/API 解析 + 详情字段映射
