@@ -172,3 +172,35 @@ DAILY_TEMPLATE = env.from_string("""\
 def render_daily(stats: DailyReportStats) -> str:
     pending_lines = "\n".join(_pending_line(rid, h, sc) for rid, h, sc in stats.still_pending)
     return DAILY_TEMPLATE.render(s=stats, pending_lines=pending_lines).strip()
+
+
+# === 场景 C：买家版退款临期 ===
+
+@dataclass
+class BuyerPushPayload:
+    """场景 C 的推送内容。"""
+    refund_no: str
+    shop_name: str
+    item_title_first10: str       # 商品名前 10 字
+    item_sku_title: str           # 规格，如"藏青色;2XL"
+    hours_left: float             # 剩余处理小时数
+    receiver_name: str | None = None
+    receiver_phone: str | None = None
+    operate_status_str: str | None = None    # 如"商家同意退货，请退回商品"
+
+
+C_TEMPLATE = env.from_string("""\
+⚠️ **买家版退款临期提醒**（剩余 {{ '%.1f'|format(p.hours_left) }}h）
+> 店铺：{{ p.shop_name or '—' }}
+> 商品：{{ p.item_title_first10 or '—' }}
+> 规格：{{ p.item_sku_title or '—' }}
+> 收件人：{{ p.receiver_name or '—' }} / {{ p.receiver_phone or '—' }}
+> 退款编号：`{{ p.refund_no }}`
+{% if p.operate_status_str %}
+> 当前操作：{{ p.operate_status_str }}
+{% endif %}
+""")
+
+
+def render_c(p: BuyerPushPayload) -> str:
+    return C_TEMPLATE.render(p=p).strip()

@@ -13,6 +13,7 @@ PENDING_STATUSES = {STATUS_PENDING_MERCHANT_ACTION, STATUS_PENDING_MERCHANT_RECE
 TIER_URGENT_HOURS = 24.0       # A2
 TIER_WARN_HOURS = 48.0         # A
 SIGNED_THRESHOLD_DAYS = 2      # B
+C_TIMEOUT_SECONDS = 25 * 3600  # C：买家版「待买家处理退货」剩余 ≤ 25h 触发
 
 
 @dataclass
@@ -135,3 +136,35 @@ def to_payload(d: Decision) -> PushPayload:
         carrier=d.logistics.carrier if d.logistics else None,
         trace_text=d.logistics.trace_text if d.logistics else None,
     )
+
+
+# === 买家版（场景 C）===
+
+@dataclass
+class BuyerDecision:
+    """买家版规则判定结果。"""
+    refund: "BuyerRefundRecord"  # forward ref，避免循环 import
+    scenarios: list[str] = field(default_factory=list)
+    hours_left: float | None = None
+
+
+def evaluate_buyer(refunds: Iterable) -> list[BuyerDecision]:
+    """对买家版退款判定 C：「待买家处理退货」且剩余倒计时 ≤ 25h。
+
+    倒计时由微店服务端权威给出（refundCard.autoCountdownInSecond），本地不算时间差。
+    refunds 元素需带 countdown_seconds 字段（已被 buyer_client.enrich_refunds 补全）。
+    """
+    out: list[BuyerDecision] = []
+    for r in refunds:
+        if getattr(r, "refund_status_str", None) != "待买家处理退货":
+            continue
+        cd = getattr(r, "countdown_seconds", None)
+        if cd is None:
+            continue
+        if cd <= C_TIMEOUT_SECONDS:
+            out.append(BuyerDecision(
+                refund=r,
+                scenarios=["C"],
+                hours_left=cd / 3600.0,
+            ))
+    return out

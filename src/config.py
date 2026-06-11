@@ -16,6 +16,7 @@ STORAGE_STATE_PATH = DATA_DIR / "storage_state.json"
 load_dotenv(ROOT / ".env")
 
 WECOM_WEBHOOK_URL = os.getenv("WECOM_WEBHOOK_URL", "")
+WECOM_WEBHOOK_URL_BUYER = os.getenv("WECOM_WEBHOOK_URL_BUYER", "")
 WEIDIAN_USERNAME = os.getenv("WEIDIAN_USERNAME", "")
 WEIDIAN_PASSWORD = os.getenv("WEIDIAN_PASSWORD", "")
 WEIDIAN_SHOP_ID = os.getenv("WEIDIAN_SHOP_ID", "")

@@ -16,14 +16,16 @@ from dataclasses import asdict
 from datetime import datetime, time as dtime
 from pathlib import Path
 
-from src.config import LOGS_DIR, TIMEZONE
+from src.config import LOGS_DIR, TIMEZONE, WECOM_WEBHOOK_URL_BUYER
 from src.db import get_conn
 from src.logistics import weidian_trace as logistics_provider
 from src.notify import render as card_render, wecom
 from src.notify.templates import (
+    BuyerPushPayload,
     OverviewStats,
     render_b,
     render_b_group_header,
+    render_c,
     render_overview,
     render_urgent,
 )
@@ -34,8 +36,10 @@ from src.rules.engine import (
     STATUS_PENDING_MERCHANT_RECEIVE,
     TIER_WARN_HOURS,
     evaluate,
+    evaluate_buyer,
     to_payload,
 )
+from src.weidian import buyer_client
 from src.weidian import client as weidian_client
 from src.weidian import order_supplier as weidian_supplier
 from src.weidian import overview as weidian_overview
@@ -319,6 +323,61 @@ def _push_b(decisions, now: datetime, dry_run: bool) -> int:
     return n
 
 
+def _push_buyer_c(dry_run: bool) -> int:
+    """场景 C：买家版「待买家处理退货」剩余 ≤ 25h 的逐笔推送。
+
+    走独立 webhook（WECOM_WEBHOOK_URL_BUYER）。
+    失败仅 log + 告警，不阻断卖家版主流程。
+    """
+    try:
+        refunds = buyer_client.fetch_refund_list_html(type_=5)
+    except buyer_client.WeidianNotLoggedIn as e:
+        log.warning("buyer-side login expired: %s", e)
+        wecom.send_alert(f"买家版登录失效，C 场景无法工作：{e}")
+        return 0
+    except Exception as e:
+        log.exception("buyer refund list fetch failed: %s", e)
+        wecom.send_alert(f"买家版退款列表抓取失败：{e}")
+        return 0
+
+    try:
+        buyer_client.enrich_refunds(refunds)
+    except buyer_client.WeidianNotLoggedIn as e:
+        log.warning("buyer-side login expired during enrich: %s", e)
+        wecom.send_alert(f"买家版登录失效（enrich 阶段）：{e}")
+        return 0
+    except Exception as e:
+        log.exception("buyer refund enrich failed: %s", e)
+        # 不中断 — evaluate 会跳过 countdown_seconds 为 None 的笔
+    decisions = evaluate_buyer(refunds)
+    log.info("C candidates: %d (buyer refunds total: %d)", len(decisions), len(refunds))
+
+    n = 0
+    for d in decisions:
+        r = d.refund
+        payload = BuyerPushPayload(
+            refund_no=r.refund_no,
+            shop_name=r.shop_name,
+            item_title_first10=(r.item_title or "")[:10],
+            item_sku_title=r.item_sku_title,
+            hours_left=d.hours_left or 0.0,
+            receiver_name=r.receiver_name,
+            receiver_phone=r.receiver_phone,
+            operate_status_str=r.operate_status_str,
+        )
+        msg = render_c(payload)
+        if dry_run:
+            log.info("[dry-run] C %s shop=%s hours_left=%.1f",
+                     r.refund_no, r.shop_name, d.hours_left or 0)
+            continue
+        try:
+            wecom.send_markdown(msg, webhook_url=WECOM_WEBHOOK_URL_BUYER)
+            n += 1
+        except Exception as e:
+            log.exception("C push failed %s: %s", r.refund_no, e)
+    return n
+
+
 def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bool = False) -> int:
     setup_logging()
     started = datetime.now(TIMEZONE)
@@ -367,9 +426,13 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
     pushed_b = _push_b(decisions, started, dry_run)
     log.info("B pushed: %d", pushed_b)
 
-    pushed_count = pushed_urgent + pushed_b
+    # 8. 推 C 买家版临期（走独立 webhook，失败不影响卖家版）
+    pushed_c = _push_buyer_c(dry_run)
+    log.info("C pushed: %d", pushed_c)
 
-    # 8. 早报（仅 09:00 那轮）
+    pushed_count = pushed_urgent + pushed_b + pushed_c
+
+    # 9. 早报（仅 09:00 那轮）
     if daily_report and not dry_run:
         try:
             from src.report.daily import build_and_send
@@ -377,15 +440,16 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
         except Exception as e:
             log.exception("daily report failed: %s", e)
 
-    # 9. run_log
+    # 10. run_log
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO run_log(started_at, finished_at, ok, note) VALUES (?,?,?,?)",
             (snapshot_at, datetime.now(TIMEZONE).isoformat(), 1,
-             f"refunds={len(refunds)} pending={len(pending)} urgent={pushed_urgent} b={pushed_b}"),
+             f"refunds={len(refunds)} pending={len(pending)} "
+             f"urgent={pushed_urgent} b={pushed_b} c={pushed_c}"),
         )
 
-    log.info("=== run done urgent=%d B=%d ===", pushed_urgent, pushed_b)
+    log.info("=== run done urgent=%d B=%d C=%d ===", pushed_urgent, pushed_b, pushed_c)
     return 0
 
 
