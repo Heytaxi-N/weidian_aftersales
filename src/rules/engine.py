@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Iterable
@@ -166,5 +167,62 @@ def evaluate_buyer(refunds: Iterable) -> list[BuyerDecision]:
                 refund=r,
                 scenarios=["C"],
                 hours_left=cd / 3600.0,
+            ))
+    return out
+
+
+# === 场景 D：卖家版退货单号 ↔ 买家版售后 关联 ===
+
+def _normalize_phone(s: str | None) -> str:
+    """归一化手机号用于跨侧匹配：去非数字 + 去前导国家码 86。"""
+    if not s:
+        return ""
+    digits = re.sub(r"\D", "", str(s))
+    if len(digits) > 11 and digits.startswith("86"):
+        digits = digits[2:]
+    return digits
+
+
+@dataclass
+class DDecision:
+    """D 判定：一笔买家版「待买家处理退货」匹配到卖家版退货单号。"""
+    buyer_refund: "BuyerRefundRecord"   # forward ref
+    return_tracking_no: str             # 来自卖家版「待商家收货」
+    seller_refund_id: str
+
+
+def match_d(buyer_refunds: Iterable, seller_refunds: Iterable) -> list[DDecision]:
+    """按客户手机号关联：买家版「待买家处理退货」↔ 卖家版「待商家收货」（有退货单号）。
+
+    - buyer_refunds: BuyerRefundRecord 列表，需带 customer_phone（buyer_client.enrich_refunds 补全）
+    - seller_refunds: RefundRecord 列表（run() 里的 pending）
+
+    只对买家侧「待买家处理退货」产出 —— 店主已填过单号的（买家侧状态已流转）自动不推。
+    卖家侧索引同时用 buyer_phone 和 receiver_phone（实测两者都可能是客户号）。
+    """
+    seller_idx: dict[str, "RefundRecord"] = {}
+    for s in seller_refunds:
+        if getattr(s, "status", None) != STATUS_PENDING_MERCHANT_RECEIVE:
+            continue
+        if not getattr(s, "return_tracking_no", None):
+            continue
+        for ph in (getattr(s, "buyer_phone", None), getattr(s, "receiver_phone", None)):
+            n = _normalize_phone(ph)
+            if n:
+                seller_idx.setdefault(n, s)
+
+    out: list[DDecision] = []
+    for b in buyer_refunds:
+        if getattr(b, "refund_status_str", None) != "待买家处理退货":
+            continue
+        n = _normalize_phone(getattr(b, "customer_phone", None))
+        if not n:
+            continue
+        s = seller_idx.get(n)
+        if s is not None:
+            out.append(DDecision(
+                buyer_refund=b,
+                return_tracking_no=s.return_tracking_no,
+                seller_refund_id=s.refund_id,
             ))
     return out

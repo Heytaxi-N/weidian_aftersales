@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 BUYER_REFUND_LIST_API = "https://thor.weidian.com/refundplatform/buyer.frontRefundList/1.0"
 BUYER_REFUND_LIST_URL = "https://weidian.com/user/order/refundList"   # SSR 后备方案（受 sid 绑定单店铺）
 BUYER_REFUND_DETAIL_URL = "https://thor.weidian.com/refundplatform/getRefundDetail/1.0"
+BUYER_ORDER_DETAIL_API = "https://thor.weidian.com/tradeview/buyer.getOrderDetailForApp/1.0"
 BUYER_REFUND_DETAIL_PAGE_FMT = (
     "https://weidian.com/weidian-h5/aftersale/refund-detail.html"
     "?role=1&refund_num={refund_no}"
@@ -71,11 +72,14 @@ class BuyerRefundRecord:
     refund_status_str: str       # "待买家处理退货" / "待商家处理退货" / ...
     add_time: datetime | None    # 退款发起时间
     update_time: datetime | None # 状态变更时间
-    # 走详情接口补全（懒加载）
+    # 走退款详情接口补全（懒加载）
     countdown_seconds: int | None = None     # autoCountdownInSecond（C 触发用）
     operate_status_str: str | None = None    # 如"商家同意退货，请退回商品"
-    receiver_name: str | None = None         # buyerName（买家自己姓名）
-    receiver_phone: str | None = None        # buyerPhone
+    receiver_name: str | None = None         # 退款详情 buyerName（= 店主自己，少用）
+    receiver_phone: str | None = None        # 退款详情 buyerPhone（= 店主自己）
+    # 走订单详情接口补全：真实客户（代发收件人），用于 D 关联 + C/D 展示
+    customer_name: str | None = None         # 订单 buyerInfo.name（收件人）
+    customer_phone: str | None = None        # 订单 buyerInfo.telephone（收件人手机）
 
 
 # <script id="__rocker-render-inject__" ... data-obj="<HTML-escaped JSON>" ...>
@@ -233,11 +237,48 @@ def fetch_refund_detail(refund_no: str, client: httpx.Client | None = None) -> d
             client.close()
 
 
+def fetch_order_customer(order_id: str, client: httpx.Client | None = None) -> tuple[str | None, str | None]:
+    """调买家版订单详情，取真实客户（代发收件人）姓名 + 手机号。
+
+    返回 (name, phone)。买家版退款详情里的 buyerName/buyerPhone 是店主自己，
+    真实客户在订单详情的 buyerInfo（nameDesc="收件人"）。
+    """
+    own_client = client is None
+    if own_client:
+        cookies, _ = _load_cookies_and_token()
+        client = httpx.Client(cookies=cookies, headers=HEADERS)
+    try:
+        param = json.dumps({"order_id": order_id, "from": "h5"},
+                           separators=(",", ":"), ensure_ascii=False)
+        r = client.get(
+            BUYER_ORDER_DETAIL_API,
+            params={"param": param, "_": str(int(time.time() * 1000))},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        status = data.get("status") or {}
+        if status.get("code") != 0:
+            msg = status.get("message", "")
+            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+                raise WeidianNotLoggedIn(f"订单详情接口要求登录：{msg}")
+            raise WeidianApiError(
+                f"getOrderDetailForApp code={status.get('code')} message={msg}"
+            )
+        buyer_info = (data.get("result") or {}).get("buyerInfo") or {}
+        return buyer_info.get("name") or None, buyer_info.get("telephone") or None
+    finally:
+        if own_client:
+            client.close()
+
+
 def enrich_refunds(refunds: Iterable[BuyerRefundRecord]) -> None:
     """对「待买家处理退货」的退款逐笔补详情字段（in-place）。
 
-    其他状态不调详情（无谓的接口调用）。
-    单笔失败仅 log warning，不阻塞其他。
+    每笔调两个接口：
+      - getRefundDetail：倒计时、操作状态（C 用）
+      - getOrderDetailForApp：真实客户姓名/手机（C 展示 + D 关联用）
+    其他状态不调（无谓的接口调用）。单笔失败仅 log warning，不阻塞其他。
     """
     targets = [r for r in refunds
                if r.refund_status_str == STATUS_PENDING_BUYER_RETURN]
@@ -251,13 +292,20 @@ def enrich_refunds(refunds: Iterable[BuyerRefundRecord]) -> None:
                 time.sleep(DETAIL_CALL_INTERVAL_SECONDS)
             try:
                 result = fetch_refund_detail(r.refund_no, client=client)
+                card = result.get("refundCard") or {}
+                basic = result.get("refundBasicInfo") or {}
+                r.countdown_seconds = card.get("autoCountdownInSecond")
+                r.operate_status_str = card.get("operateStatusStr") or None
+                r.receiver_name = basic.get("buyerName") or None
+                r.receiver_phone = basic.get("buyerPhone") or None
             except Exception as e:
                 log.warning("buyer refund detail failed for %s: %s", r.refund_no, e)
-                continue
-            card = result.get("refundCard") or {}
-            basic = result.get("refundBasicInfo") or {}
-            r.countdown_seconds = card.get("autoCountdownInSecond")
-            r.operate_status_str = card.get("operateStatusStr") or None
-            r.receiver_name = basic.get("buyerName") or None
-            r.receiver_phone = basic.get("buyerPhone") or None
+
+            time.sleep(DETAIL_CALL_INTERVAL_SECONDS)
+            try:
+                name, phone = fetch_order_customer(r.order_id, client=client)
+                r.customer_name = name
+                r.customer_phone = phone
+            except Exception as e:
+                log.warning("buyer order detail failed for %s: %s", r.order_id, e)
     log.info("buyer refunds enriched: %d", len(targets))

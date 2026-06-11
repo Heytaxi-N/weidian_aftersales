@@ -165,6 +165,10 @@ def test_enrich_refunds_populates_countdown_and_receiver(monkeypatch):
         buyer_client, "fetch_refund_detail",
         lambda refund_no, client=None: _mock_detail_response(),
     )
+    monkeypatch.setattr(
+        buyer_client, "fetch_order_customer",
+        lambda order_id, client=None: ("李客户", "13700137000"),
+    )
     # 抑制 _load_cookies_and_token（避免读 storage_state.json）
     monkeypatch.setattr(buyer_client, "_load_cookies_and_token", lambda: ({}, ""))
     # 抑制 httpx.Client 真正建立连接（enrich 用上下文管理器但不会被 fetch 调用，因为 mock 了）
@@ -179,8 +183,10 @@ def test_enrich_refunds_populates_countdown_and_receiver(monkeypatch):
     enrich_refunds([r])
     assert r.countdown_seconds == 599379
     assert r.operate_status_str == "商家同意退货，请退回商品"
-    assert r.receiver_name == "张三"
+    assert r.receiver_name == "张三"           # 退款详情 = 店主自己
     assert r.receiver_phone == "13800138000"
+    assert r.customer_name == "李客户"          # 订单详情 = 真实客户
+    assert r.customer_phone == "13700137000"
 
 
 def test_enrich_refunds_skips_non_buyer_pending_status(monkeypatch):
@@ -214,6 +220,8 @@ def test_enrich_refunds_swallows_per_item_errors(monkeypatch):
         return _mock_detail_response(countdown=int(refund_no[1:]) * 100)
 
     monkeypatch.setattr(buyer_client, "fetch_refund_detail", fake_detail)
+    monkeypatch.setattr(buyer_client, "fetch_order_customer",
+                        lambda order_id, client=None: ("客户", "13700137000"))
     monkeypatch.setattr(buyer_client, "_load_cookies_and_token", lambda: ({}, ""))
     class _FakeClient:
         def __enter__(self): return self
