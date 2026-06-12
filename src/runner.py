@@ -400,10 +400,16 @@ def _send_buyer_heartbeat(buyer_refunds, pushed_c: int, pushed_d: int,
     """买家版巡检心跳：每轮固定发一条，哪怕 C/D 都是 0，让店主有预期（系统跑了/没失败）。"""
     pending = [r for r in buyer_refunds
                if getattr(r, "refund_status_str", None) == "待买家处理退货"]
+
+    def _color(n: int) -> str:
+        # 0 → 绿色(info)，>0 → 橙红(warning)
+        c = "info" if n == 0 else "warning"
+        return f'<font color="{c}">{n}</font>'
+
     lines = [
         f"📋 **买家版巡检 {now.strftime('%m-%d %H:%M')}**",
         f"> 待买家处理退货：{len(pending)} 笔",
-        f"> C 临期提醒(≤25h)：{pushed_c}　D 待填单号：{pushed_d}",
+        f"> C 临期提醒(≤25h)：{_color(pushed_c)}　D 待填单号：{_color(pushed_d)}",
     ]
     if pushed_c == 0 and pushed_d == 0:
         if pending:
