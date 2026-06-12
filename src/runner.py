@@ -395,6 +395,39 @@ def _push_buyer_c(buyer_refunds, dry_run: bool) -> int:
     return n
 
 
+def _send_buyer_heartbeat(buyer_refunds, pushed_c: int, pushed_d: int,
+                          now: datetime, dry_run: bool) -> None:
+    """买家版巡检心跳：每轮固定发一条，哪怕 C/D 都是 0，让店主有预期（系统跑了/没失败）。"""
+    pending = [r for r in buyer_refunds
+               if getattr(r, "refund_status_str", None) == "待买家处理退货"]
+    lines = [
+        f"📋 **买家版巡检 {now.strftime('%m-%d %H:%M')}**",
+        f"> 待买家处理退货：{len(pending)} 笔",
+        f"> C 临期提醒(≤25h)：{pushed_c}　D 待填单号：{pushed_d}",
+    ]
+    if pushed_c == 0 and pushed_d == 0:
+        if pending:
+            # 有待处理但都不满足触发条件，列出最紧迫几笔的倒计时让店主心里有数
+            def _cd(r):
+                return r.countdown_seconds if r.countdown_seconds is not None else 10**12
+            top = sorted(pending, key=_cd)[:5]
+            lines.append("> 本轮无需操作（最紧迫几笔倒计时）：")
+            for r in top:
+                h = (r.countdown_seconds or 0) / 3600
+                lines.append(f">   · {(r.item_title or '')[:12]}　{h:.0f}h")
+        else:
+            lines.append("> ✅ 本轮无待办")
+    msg = "\n".join(lines)
+    if dry_run:
+        log.info("[dry-run] buyer heartbeat: pending=%d c=%d d=%d",
+                 len(pending), pushed_c, pushed_d)
+        return
+    try:
+        wecom.send_markdown(msg, webhook_url=WECOM_WEBHOOK_URL_BUYER)
+    except Exception as e:
+        log.exception("buyer heartbeat send failed: %s", e)
+
+
 def _push_d(buyer_refunds, seller_refunds, dry_run: bool) -> int:
     """场景 D：买家版「待买家处理退货」匹配卖家版退货单号 → 提醒店主去买家版填单号。
 
@@ -595,6 +628,8 @@ def run(*, dry_run: bool = False, daily_report: bool = False, skip_logistics: bo
         else:
             pushed_d = _push_d(buyer_refunds, pending, dry_run)
             log.info("D pushed: %d", pushed_d)
+        # 买家版巡检心跳：每轮固定发一条，C/D 都 0 也发
+        _send_buyer_heartbeat(buyer_refunds, pushed_c, pushed_d, started, dry_run)
 
     pushed_count = pushed_urgent + pushed_b + pushed_c + pushed_d
 
