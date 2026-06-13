@@ -76,6 +76,16 @@ def _load_cookies_and_token() -> tuple[dict[str, str], str]:
     return cookies, wdtoken
 
 
+def _is_login_error(msg: str) -> bool:
+    """判断微店 API 报错是否为登录失效（大小写不敏感）。
+
+    实测会出现大写 "LOGIN ERROR"，故必须 lower() 后匹配，否则会被当成
+    普通 API 错误吞掉、不触发重登告警。
+    """
+    m = (msg or "").lower()
+    return any(kw in m for kw in ("登录", "login", "未授权", "token", "未登录", "请重新"))
+
+
 def _call(client: httpx.Client, path: str, param: dict, wdtoken: str) -> dict:
     # 注意：路径用点号分隔（如 seller.refundSearchList），且 1.0 后不带斜杠
     url = f"{API_BASE}/{path}/1.0"
@@ -92,7 +102,7 @@ def _call(client: httpx.Client, path: str, param: dict, wdtoken: str) -> dict:
         msg = status.get("message", "")
         log.error("API %s returned code=%s msg=%s url=%s",
                   path, status.get("code"), msg, str(r.request.url)[:300])
-        if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+        if _is_login_error(msg):
             raise WeidianNotLoggedIn(f"API 返回: {msg}")
         raise WeidianApiError(f"{path} returned code={status.get('code')} message={msg}")
     return data

@@ -33,7 +33,12 @@ from typing import Iterable
 import httpx
 
 from src.config import TIMEZONE
-from src.weidian.client import _load_cookies_and_token, WeidianNotLoggedIn, WeidianApiError
+from src.weidian.client import (
+    _is_login_error,
+    _load_cookies_and_token,
+    WeidianNotLoggedIn,
+    WeidianApiError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -175,7 +180,7 @@ def fetch_refund_list() -> list[BuyerRefundRecord]:
         status = data.get("status") or {}
         if status.get("code") != 0:
             msg = status.get("message", "")
-            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+            if _is_login_error(msg):
                 raise WeidianNotLoggedIn(f"frontRefundList 要求登录：{msg}")
             raise WeidianApiError(
                 f"buyer.frontRefundList code={status.get('code')} message={msg}"
@@ -226,7 +231,7 @@ def fetch_refund_detail(refund_no: str, client: httpx.Client | None = None) -> d
         status = data.get("status") or {}
         if status.get("code") != 0:
             msg = status.get("message", "")
-            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+            if _is_login_error(msg):
                 raise WeidianNotLoggedIn(f"详情接口要求登录：{msg}")
             raise WeidianApiError(
                 f"getRefundDetail code={status.get('code')} message={msg}"
@@ -260,7 +265,7 @@ def fetch_order_customer(order_id: str, client: httpx.Client | None = None) -> t
         status = data.get("status") or {}
         if status.get("code") != 0:
             msg = status.get("message", "")
-            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+            if _is_login_error(msg):
                 raise WeidianNotLoggedIn(f"订单详情接口要求登录：{msg}")
             raise WeidianApiError(
                 f"getOrderDetailForApp code={status.get('code')} message={msg}"
@@ -386,7 +391,7 @@ def submit_return_express(
         status = data.get("status") or {}
         if status.get("code") != 0:
             msg = status.get("message", "")
-            if any(kw in msg for kw in ("登录", "login", "未授权", "token")):
+            if _is_login_error(msg):
                 raise WeidianNotLoggedIn(f"submitExpressInfo 要求登录：{msg}")
             raise WeidianApiError(
                 f"submitExpressInfo code={status.get('code')} message={msg}"
